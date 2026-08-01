@@ -42,3 +42,14 @@ func TestParseLicenses(t *testing.T) {
 		t.Fatalf("unexpected licenses: %v", got)
 	}
 }
+
+func TestParseLicensesFromPublishedMetadataHeader(t *testing.T) {
+	csv := "Polygenic Score (PGS) ID,PGS Name,License/Terms of Use\nPGS000001,example,EBI terms\n"
+	got, err := ParseLicenses(strings.NewReader(csv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["PGS000001"] != "EBI terms" {
+		t.Fatalf("unexpected licenses: %v", got)
+	}
+}

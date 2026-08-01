@@ -98,10 +98,11 @@ func ParseLicenses(r io.Reader) (map[string]string, error) {
 	}
 	idCol, licenseCol := -1, -1
 	for i, h := range header {
-		switch strings.ToLower(strings.TrimSpace(h)) {
-		case "pgs_id", "pgs id":
+		normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(h, "\ufeff")))
+		switch normalized {
+		case "pgs_id", "pgs id", "polygenic score (pgs) id":
 			idCol = i
-		case "license", "license_name":
+		case "license", "license_name", "license/terms of use":
 			licenseCol = i
 		}
 	}
