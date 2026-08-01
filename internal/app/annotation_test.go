@@ -104,7 +104,8 @@ func TestAnnotateUsesOnlyStoredObjectsAndThenNoOps(t *testing.T) {
 	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
 	legacy := seedLegacyRelease(t, a, now,
 		annotationFixture{PGSID: "PGS000001", Data: gzipFixture(harmonizedHeaderFixture)},
-		annotationFixture{PGSID: "PGS000002", Data: []byte("not a gzip stream")},
+		annotationFixture{PGSID: "PGS000002", Data: gzipFixture("mystery_a\tmystery_b\nvalue_a\tvalue_b\n")},
+		annotationFixture{PGSID: "PGS000003", Data: []byte("not a gzip stream")},
 	)
 	secondary, err := localstore.New(t.TempDir())
 	if err != nil {
@@ -113,7 +114,10 @@ func TestAnnotateUsesOnlyStoredObjectsAndThenNoOps(t *testing.T) {
 	a.targets = append(a.targets, target{kind: "local", Store: secondary})
 	a.now = func() time.Time { return now.Add(time.Minute) }
 
-	report, err := a.Annotate(context.Background(), false)
+	var progress []AnnotationProgress
+	report, err := a.AnnotateWithProgress(context.Background(), false, func(update AnnotationProgress) {
+		progress = append(progress, update)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,14 +127,24 @@ func TestAnnotateUsesOnlyStoredObjectsAndThenNoOps(t *testing.T) {
 	if !report.UpstreamIndependent || !report.Changed || !report.RepairedTargets || report.SourceReleaseID != legacy.ReleaseID || report.ReleaseID == legacy.ReleaseID {
 		t.Fatalf("unexpected annotation report: %+v", report)
 	}
-	if report.Available != 2 || report.Inspected != 2 || report.Updated != 2 || report.Recognized != 1 || report.Unreadable != 1 || report.Failed != 0 {
+	if report.Available != 3 || report.Inspected != 3 || report.Updated != 3 || report.Recognized != 1 || report.Unrecognized != 1 || report.Unreadable != 1 || report.Failed != 0 {
 		t.Fatalf("unexpected annotation counts: %+v", report)
+	}
+	if len(report.Anomalies) != 2 || report.Anomalies[0].PGSID != "PGS000002" || report.Anomalies[0].Observation.Status != scoreheader.StatusUnrecognized || report.Anomalies[1].PGSID != "PGS000003" || report.Anomalies[1].Observation.Status != scoreheader.StatusUnreadable {
+		t.Fatalf("unexpected anomaly details: %+v", report.Anomalies)
+	}
+	if len(progress) < 2 || progress[0].Available != 3 || progress[0].Processed != 0 {
+		t.Fatalf("missing initial progress: %+v", progress)
+	}
+	lastProgress := progress[len(progress)-1]
+	if lastProgress.Processed != 3 || lastProgress.Inspected != 3 || lastProgress.Updated != 3 || lastProgress.Unrecognized != 1 || lastProgress.Unreadable != 1 {
+		t.Fatalf("unexpected final progress: %+v", lastProgress)
 	}
 	pointer, entries, err := a.latest(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pointer.HeaderInspectorVersion != scoreheader.InspectorVersion || len(entries) != 2 {
+	if pointer.HeaderInspectorVersion != scoreheader.InspectorVersion || len(entries) != 3 {
 		t.Fatalf("annotated release is incomplete: pointer=%+v entries=%+v", pointer, entries)
 	}
 	for _, entry := range entries {
@@ -154,7 +168,7 @@ func TestAnnotateUsesOnlyStoredObjectsAndThenNoOps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.Changed || second.ReleaseID != pointer.ReleaseID || second.Inspected != 0 || second.Unchanged != 2 {
+	if second.Changed || second.ReleaseID != pointer.ReleaseID || second.Inspected != 0 || second.Unchanged != 3 || len(second.Anomalies) != 2 {
 		t.Fatalf("current annotation pass was not a no-op: %+v", second)
 	}
 	if upstreamRequests.Load() != 0 {

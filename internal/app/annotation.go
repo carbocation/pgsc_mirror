@@ -23,6 +23,32 @@ type AnnotationFailure struct {
 	Error string `json:"error"`
 }
 
+// AnnotationAnomaly preserves the complete observation for a score whose
+// stored header was readable but unrecognized, or could not be decoded.
+type AnnotationAnomaly struct {
+	PGSID       string                 `json:"pgs_id"`
+	Observation scoreheader.Inspection `json:"observation"`
+}
+
+// AnnotationProgress is a point-in-time view of a stored-object annotation
+// pass. Processed includes both objects read during this pass and current
+// observations reused from the pinned manifest.
+type AnnotationProgress struct {
+	Available    int `json:"available"`
+	Processed    int `json:"processed"`
+	Inspected    int `json:"inspected"`
+	Updated      int `json:"updated"`
+	Unchanged    int `json:"unchanged"`
+	Recognized   int `json:"recognized"`
+	Unrecognized int `json:"unrecognized"`
+	Unreadable   int `json:"unreadable"`
+	Failed       int `json:"failed"`
+}
+
+// AnnotationProgressReporter receives monotonically increasing progress from
+// the result-collection goroutine. It should return quickly.
+type AnnotationProgressReporter func(AnnotationProgress)
+
 // AnnotationReport describes one upstream-independent annotation pass.
 type AnnotationReport struct {
 	Command             string              `json:"command"`
@@ -40,6 +66,7 @@ type AnnotationReport struct {
 	Unrecognized        int                 `json:"unrecognized"`
 	Unreadable          int                 `json:"unreadable"`
 	Failed              int                 `json:"failed"`
+	Anomalies           []AnnotationAnomaly `json:"anomalies,omitempty"`
 	Failures            []AnnotationFailure `json:"failures,omitempty"`
 	Message             string              `json:"message"`
 }
@@ -49,12 +76,22 @@ type AnnotationReport struct {
 // catalog or HTTP transfer clients, which makes upstream independence an
 // architectural property rather than a request option.
 func (a *App) Annotate(ctx context.Context, dryRun bool) (report AnnotationReport, runErr error) {
+	return a.annotate(ctx, dryRun, nil)
+}
+
+// AnnotateWithProgress is Annotate with point-in-time progress reporting. The
+// reporter affects output only and does not change publication semantics.
+func (a *App) AnnotateWithProgress(ctx context.Context, dryRun bool, progress AnnotationProgressReporter) (report AnnotationReport, runErr error) {
+	return a.annotate(ctx, dryRun, progress)
+}
+
+func (a *App) annotate(ctx context.Context, dryRun bool, progress AnnotationProgressReporter) (report AnnotationReport, runErr error) {
 	report = AnnotationReport{Command: "annotate", DryRun: dryRun, UpstreamIndependent: true}
 	if len(a.targets) == 0 {
 		return report, errors.New("no configured targets")
 	}
 	if dryRun {
-		return a.annotateCurrent(ctx, report, false)
+		return a.annotateCurrent(ctx, report, false, progress)
 	}
 	if a.State == nil {
 		return report, errors.New("writable state is not open")
@@ -85,10 +122,10 @@ func (a *App) Annotate(ctx context.Context, dryRun bool) (report AnnotationRepor
 	if err := a.cleanupStaging(); err != nil {
 		return report, fmt.Errorf("clean provider staging: %w", err)
 	}
-	return a.annotateCurrent(ctx, report, true)
+	return a.annotateCurrent(ctx, report, true, progress)
 }
 
-func (a *App) annotateCurrent(ctx context.Context, report AnnotationReport, writable bool) (AnnotationReport, error) {
+func (a *App) annotateCurrent(ctx context.Context, report AnnotationReport, writable bool, progress AnnotationProgressReporter) (AnnotationReport, error) {
 	pointer, entries, err := a.latest(ctx)
 	if err != nil {
 		return report, err
@@ -112,7 +149,7 @@ func (a *App) annotateCurrent(ctx context.Context, report AnnotationReport, writ
 		}
 	}
 
-	report, err = annotateStoredHeaders(ctx, a.targets[0].Store, entries, a.Config.Transfer.FileConcurrency, report)
+	report, err = annotateStoredHeaders(ctx, a.targets[0].Store, entries, a.Config.Transfer.FileConcurrency, report, progress)
 	if err != nil {
 		return report, err
 	}
@@ -187,7 +224,7 @@ type annotationResult struct {
 	err        error
 }
 
-func annotateStoredHeaders(ctx context.Context, source store.Store, entries []model.Entry, workers int, report AnnotationReport) (AnnotationReport, error) {
+func annotateStoredHeaders(ctx context.Context, source store.Store, entries []model.Entry, workers int, report AnnotationReport, progress AnnotationProgressReporter) (AnnotationReport, error) {
 	var pending []int
 	for i := range entries {
 		if entries[i].Status != model.StatusReady {
@@ -196,12 +233,14 @@ func annotateStoredHeaders(ctx context.Context, source store.Store, entries []mo
 		report.Available++
 		if entries[i].Header.Current() {
 			report.Unchanged++
-			countAnnotationStatus(&report, entries[i].Header.Status)
+			recordAnnotationObservation(&report, entries[i].PGSID, *entries[i].Header)
 			continue
 		}
 		pending = append(pending, i)
 	}
+	reportAnnotationProgress(progress, report)
 	if len(pending) == 0 {
+		sortAnnotationDetails(&report)
 		return report, nil
 	}
 	if workers < 1 {
@@ -260,17 +299,48 @@ func annotateStoredHeaders(ctx context.Context, source store.Store, entries []mo
 		if result.err != nil {
 			report.Failed++
 			report.Failures = append(report.Failures, AnnotationFailure{PGSID: entries[result.index].PGSID, Error: result.err.Error()})
+			reportAnnotationProgress(progress, report)
 			continue
 		}
 		entries[result.index].Header = &result.inspection
 		report.Updated++
-		countAnnotationStatus(&report, result.inspection.Status)
+		recordAnnotationObservation(&report, entries[result.index].PGSID, result.inspection)
+		reportAnnotationProgress(progress, report)
 	}
+	sortAnnotationDetails(&report)
 	if err := ctx.Err(); err != nil {
 		return report, err
 	}
-	sort.Slice(report.Failures, func(i, j int) bool { return report.Failures[i].PGSID < report.Failures[j].PGSID })
 	return report, nil
+}
+
+func reportAnnotationProgress(progress AnnotationProgressReporter, report AnnotationReport) {
+	if progress == nil {
+		return
+	}
+	progress(AnnotationProgress{
+		Available:    report.Available,
+		Processed:    report.Unchanged + report.Inspected,
+		Inspected:    report.Inspected,
+		Updated:      report.Updated,
+		Unchanged:    report.Unchanged,
+		Recognized:   report.Recognized,
+		Unrecognized: report.Unrecognized,
+		Unreadable:   report.Unreadable,
+		Failed:       report.Failed,
+	})
+}
+
+func recordAnnotationObservation(report *AnnotationReport, pgsID string, observation scoreheader.Inspection) {
+	countAnnotationStatus(report, observation.Status)
+	if observation.Status != scoreheader.StatusRecognized {
+		report.Anomalies = append(report.Anomalies, AnnotationAnomaly{PGSID: pgsID, Observation: observation})
+	}
+}
+
+func sortAnnotationDetails(report *AnnotationReport) {
+	sort.Slice(report.Anomalies, func(i, j int) bool { return report.Anomalies[i].PGSID < report.Anomalies[j].PGSID })
+	sort.Slice(report.Failures, func(i, j int) bool { return report.Failures[i].PGSID < report.Failures[j].PGSID })
 }
 
 func countAnnotationStatus(report *AnnotationReport, status string) {

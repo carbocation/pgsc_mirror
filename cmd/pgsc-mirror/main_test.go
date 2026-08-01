@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/carbocation/pgsc_mirror/internal/app"
+	"github.com/carbocation/pgsc_mirror/pkg/scoreheader"
 )
 
 func TestParseByteSize(t *testing.T) {
@@ -46,6 +47,44 @@ func TestSplitCommandRecognizesAnnotate(t *testing.T) {
 	command, args, err := splitCommand([]string{"--config", "mirror.toml", "annotate", "--dry-run"})
 	if err != nil || command != "annotate" || strings.Join(args, " ") != "--config mirror.toml --dry-run" {
 		t.Fatalf("command=%q args=%v err=%v", command, args, err)
+	}
+}
+
+func TestAnnotationProgressReporterIsPeriodicAndFinishes(t *testing.T) {
+	var out strings.Builder
+	report := annotationProgressReporter(&out)
+	for _, processed := range []int{0, 100, 249, 250, 499, 500, 749, 751, 1000} {
+		report(app.AnnotationProgress{Available: 1000, Processed: processed, Inspected: processed, Updated: processed})
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 5 {
+		t.Fatalf("progress lines=%d, want 5: %q", len(lines), out.String())
+	}
+	if !strings.Contains(lines[0], "processed=0/1000") || !strings.Contains(lines[len(lines)-1], "processed=1000/1000") {
+		t.Fatalf("progress lacks initial or final state: %q", out.String())
+	}
+}
+
+func TestPrintHumanIncludesCompleteAnnotationAnomaly(t *testing.T) {
+	var out strings.Builder
+	observation := scoreheader.Inspection{
+		InspectorVersion: scoreheader.InspectorVersion,
+		Status:           scoreheader.StatusUnrecognized,
+		Type:             scoreheader.TypeUnknown,
+		Delimiter:        "tab",
+		Columns:          []string{"mystery_a", "mystery_b"},
+		Warnings:         []string{"synthetic warning"},
+	}
+	printHuman(&out, app.AnnotationReport{
+		Message:      "dry run",
+		Available:    1,
+		Unrecognized: 1,
+		Anomalies:    []app.AnnotationAnomaly{{PGSID: "PGS000001", Observation: observation}},
+	})
+	for _, want := range []string{"header anomalies (1):", "PGS000001", `"columns":["mystery_a","mystery_b"]`, `"warnings":["synthetic warning"]`} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("human annotation report lacks %q: %s", want, out.String())
+		}
 	}
 }
 

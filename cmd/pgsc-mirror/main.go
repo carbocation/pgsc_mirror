@@ -140,7 +140,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "update":
 		result, err = a.Update(ctx, o.dryRun)
 	case "annotate":
-		result, err = a.Annotate(ctx, o.dryRun)
+		result, err = a.AnnotateWithProgress(ctx, o.dryRun, annotationProgressReporter(stderr))
 	case "pull":
 		result, err = a.Pull(ctx, o.dryRun)
 	case "verify":
@@ -247,6 +247,21 @@ func formatEventTime(t *time.Time) string {
 	return t.Format(time.RFC3339)
 }
 
+const annotationProgressInterval = 250
+
+func annotationProgressReporter(w io.Writer) app.AnnotationProgressReporter {
+	lastProcessed := -annotationProgressInterval
+	return func(progress app.AnnotationProgress) {
+		if progress.Processed != progress.Available && progress.Processed-lastProcessed < annotationProgressInterval {
+			return
+		}
+		fmt.Fprintf(w, "annotate progress: processed=%d/%d inspected=%d updated=%d unchanged=%d anomalies=%d failed=%d\n",
+			progress.Processed, progress.Available, progress.Inspected, progress.Updated, progress.Unchanged,
+			progress.Unrecognized+progress.Unreadable, progress.Failed)
+		lastProcessed = progress.Processed
+	}
+}
+
 func printHuman(w io.Writer, v any) {
 	switch r := v.(type) {
 	case app.ProbeReport:
@@ -317,6 +332,13 @@ func printHuman(w io.Writer, v any) {
 		}
 		fmt.Fprintf(w, "available=%d inspected=%d updated=%d unchanged=%d recognized=%d unrecognized=%d unreadable=%d failed=%d\n",
 			r.Available, r.Inspected, r.Updated, r.Unchanged, r.Recognized, r.Unrecognized, r.Unreadable, r.Failed)
+		if len(r.Anomalies) > 0 {
+			fmt.Fprintf(w, "header anomalies (%d):\n", len(r.Anomalies))
+			for _, anomaly := range r.Anomalies {
+				observation, _ := json.Marshal(anomaly.Observation)
+				fmt.Fprintf(w, "%s\t%s\n", anomaly.PGSID, observation)
+			}
+		}
 		for _, failure := range r.Failures {
 			fmt.Fprintf(w, "%s\t%s\n", failure.PGSID, failure.Error)
 		}

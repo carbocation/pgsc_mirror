@@ -99,7 +99,7 @@ No credentials belong in TOML. GCS uses Application Default Credentials. All ins
 
 Every command accepts `--config`. Reports accept `--json`. The explicit long-lived form is `pgsc-mirror --config config.toml run`.
 
-`annotate --dry-run` reports how many current scoring files need fresh annotations without acquiring a publication lease or writing mirror objects. `annotate` reads the current immutable blobs and stored metadata snapshots, then publishes an annotation-only successor release if needed. Header inspection is the first supported annotation; normalization, liftover, and other analytical transformations remain downstream work. The long-lived mode performs this refresh automatically when its binary supports a newer annotation version.
+`annotate --dry-run` reports how many current scoring files need fresh annotations without acquiring a publication lease or writing mirror objects. While it works, the CLI prints progress every 250 processed objects to stderr. Its final report includes the complete observation for every unrecognized or unreadable header; use `--json` and redirect stdout to retain a structured report without mixing in progress. `annotate` reads the current immutable blobs and stored metadata snapshots, then publishes an annotation-only successor release if needed. Header inspection is the first supported annotation; normalization, liftover, and other analytical transformations remain downstream work. The long-lived mode performs this refresh automatically when its binary supports a newer annotation version.
 
 ## Build
 
