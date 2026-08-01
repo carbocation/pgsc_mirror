@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	cloud.google.com/go/storage v1.64.0
 	github.com/BurntSushi/toml v1.6.0
+	github.com/carbocation/genomisc v0.0.0-20240726161303-0d45792c29a6
 	google.golang.org/api v0.287.1
 	modernc.org/sqlite v1.55.0
 )

@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	_ "github.com/carbocation/genomisc/compileinfoprint"
 	"github.com/carbocation/pgsc_mirror/internal/app"
 	"github.com/carbocation/pgsc_mirror/internal/config"
 	"github.com/carbocation/pgsc_mirror/internal/planner"
