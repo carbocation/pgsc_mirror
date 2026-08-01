@@ -16,6 +16,14 @@ LATEST.json
 
 Blobs, metadata snapshots, and manifests are immutable. `LATEST.json` is the only mutable publication object.
 
+The mirror also carries one replaceable operational object:
+
+```text
+operations/maintenance.json
+```
+
+This versioned checkpoint records the last completed checksum-sidecar audit plus the upstream score-list and metadata validators and content hashes. It is advisory rather than preservation-critical: deleting or corrupting it cannot expose an incomplete release, but causes the next process with no newer local schedule to perform a conservative full audit.
+
 ## Atomic publication
 
 A reconciliation takes a renewable provider-backed lease, verifies the MD5 of each compressed scoring file, uploads missing blobs with create-only preconditions, writes the release snapshot and manifest, and finally advances `LATEST.json` with compare-and-swap.
@@ -25,6 +33,8 @@ Any failed expected object leaves the prior release current. If a multi-target r
 ## Interruption and recovery
 
 SQLite is a disposable operational index, not the canonical mirror. It uses foreign keys, WAL, a busy timeout, and serialized writes and is not intended for GCS FUSE.
+
+Every successful full reconciliation conditionally updates `operations/maintenance.json`, including audits that find no release change. During migration, an existing SQLite database can backfill an absent checkpoint without upstream access, but only after its successful-audit sentinels match the current release snapshot hashes. On an empty or older local database, the service validates the shared checkpoint's genome build and snapshot hashes against the current `LATEST.json`, then reconstructs the current release, upstream sentinels, and audit schedule from the canonical target. A current checkpoint leads to the ordinary conditional score-list and metadata check, not one checksum-sidecar request per score. The audit is skipped only when upstream confirms both documents are unmodified; a `200` response is conservatively treated as a change signal even when its body matches the stored snapshot, because scoring-file revisions need not alter those documents. Missing, malformed, future-dated, snapshot-inconsistent, or overdue state also falls back to a full audit. A newer checkpoint format stops an older binary rather than letting it overwrite semantics it does not understand.
 
 Successful checksum-sidecar requests are checkpointed during an interrupted inventory. Verified scoring-file partials remain in `state.work_dir` until every configured target has stored them. Both can be reused after restart when the state database and work directory are on persistent disk.
 
@@ -36,7 +46,7 @@ The continuous service records successful complete reconciliations and verificat
 
 When GCS is enabled it is the authoritative target and is ordered first. Reconciliation acquires `leases/reconcile.json` under the configured GCS prefix with a does-not-exist precondition. The holder renews that object with generation-match writes and deletes the current generation when finished. A contender does not enter reconciliation while an unexpired lease is present.
 
-The lease coordinates publication work, not the complete lifetime of the service. Separate processes retain separate SQLite scheduling history and can both perform read-only sentinel checks and verification. After the lease holder finishes, a contender with stale local state may acquire the lease and repeat an otherwise unnecessary upstream audit. For this reason, multiple active services sharing a mirror are publication-safe but are not the recommended high-availability arrangement. Use one active service and a stopped standby when avoiding duplicate upstream traffic matters.
+The lease coordinates publication work, not the complete lifetime of the service. Separate processes can both perform read-only sentinel checks and verification. Full-audit scheduling, however, is portable: a contender rereads the shared maintenance checkpoint before scheduled work and adopts a newer completed audit instead of repeating it after the lease holder finishes. Multiple active services are therefore publication-safe and sidecar-audit-aware, but still waste lightweight checks and verification. One active service and a stopped standby remain the recommended arrangement.
 
 After a hard failure, a contender can conditionally remove an expired lease generation and acquire a new lease. If a former holder attempts to renew a stale generation, renewal fails and its reconciliation context is canceled. Immutable create-only objects and compare-and-swap updates to `LATEST.json` remain the final publication safeguards.
 

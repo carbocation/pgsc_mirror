@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/carbocation/pgsc_mirror/internal/manifest"
 	"github.com/carbocation/pgsc_mirror/internal/model"
@@ -366,6 +367,66 @@ func (a *App) convergeTargets(ctx context.Context, p model.Pointer, entries []mo
 			return repaired, fmt.Errorf("advance repaired pointer in %s: %w", dest.Name(), err)
 		}
 		repaired = true
+	}
+	return repaired, nil
+}
+
+// repairLaggingTargets performs provider-to-provider catch-up without reading
+// the upstream catalog. It is used by lightweight startup after local state was
+// restored from the shared maintenance checkpoint.
+func (a *App) repairLaggingTargets(ctx context.Context) (repaired bool, runErr error) {
+	if len(a.targets) < 2 {
+		return false, nil
+	}
+	pointer, entries, err := a.latest(ctx)
+	if err != nil || pointer.ReleaseID == "" {
+		return false, err
+	}
+	lagging := false
+	for _, target := range a.targets[1:] {
+		current, _, err := a.readPointer(ctx, target.Store)
+		if errors.Is(err, store.ErrNotFound) || (err == nil && current.ReleaseID != pointer.ReleaseID) {
+			lagging = true
+			break
+		}
+		if err != nil {
+			return false, fmt.Errorf("read pointer from %s: %w", target.Name(), err)
+		}
+	}
+	if !lagging {
+		return false, nil
+	}
+	lease, err := a.acquireLease(ctx)
+	if err != nil {
+		return false, err
+	}
+	ctx = a.startLeaseRenewal(ctx, lease)
+	defer func() {
+		renewErr := lease.stopRenewal()
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		releaseErr := a.releaseLease(releaseCtx, lease)
+		cancel()
+		if renewErr != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("synchronization lease renewal: %w", renewErr))
+		}
+		if releaseErr != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("release synchronization lease: %w", releaseErr))
+		}
+	}()
+	// Re-pin after acquiring the lease so a publication completed between the
+	// initial check and lease acquisition cannot be repaired backward.
+	pointer, entries, err = a.latest(ctx)
+	if err != nil {
+		return false, err
+	}
+	repaired, err = a.convergeTargets(ctx, pointer, entries)
+	if err != nil {
+		return repaired, err
+	}
+	if a.State != nil && a.Config.Targets.Local {
+		if err := a.State.RecordRelease(ctx, pointer, entries, true); err != nil {
+			return repaired, err
+		}
 	}
 	return repaired, nil
 }

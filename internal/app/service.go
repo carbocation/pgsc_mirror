@@ -44,7 +44,6 @@ func (a *App) Run(ctx context.Context, report ServiceReporter) error {
 	if ctx.Err() != nil {
 		return nil
 	}
-
 	now := a.now().UTC()
 	nextSync := now
 	lastVerify, verifiedBefore, err := a.State.LastSuccessfulVerification(ctx)
@@ -145,6 +144,9 @@ func (a *App) runScheduledVerification(ctx context.Context) (report VerifyReport
 }
 
 func (a *App) runScheduledSync(ctx context.Context, now time.Time) (string, any, error) {
+	if _, err := a.restoreMaintenanceCheckpoint(ctx); err != nil {
+		return "schedule", nil, fmt.Errorf("restore shared maintenance state: %w", err)
+	}
 	last, ok, err := a.State.LastSuccessfulReconciliation(ctx)
 	if err != nil {
 		return "schedule", nil, err

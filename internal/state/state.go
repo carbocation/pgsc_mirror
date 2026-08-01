@@ -71,6 +71,9 @@ CREATE TABLE IF NOT EXISTS sentinels (
  name TEXT PRIMARY KEY, etag TEXT NOT NULL DEFAULT '', last_modified TEXT NOT NULL DEFAULT '',
  content_sha256 TEXT NOT NULL DEFAULT '', observed_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS maintenance (
+ name TEXT PRIMARY KEY, completed_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS releases (
  release_id TEXT PRIMARY KEY, manifest_key TEXT NOT NULL, manifest_sha256 TEXT NOT NULL,
  published_at TEXT NOT NULL, entry_count INTEGER NOT NULL, complete INTEGER NOT NULL
@@ -204,7 +207,35 @@ func (d *DB) LatestRelease(ctx context.Context) (string, error) {
 // that performed a full checksum-sidecar reconciliation. Cheap unchanged
 // update checks are recorded as update-check and intentionally do not count.
 func (d *DB) LastSuccessfulReconciliation(ctx context.Context) (time.Time, bool, error) {
-	return d.lastSuccessfulRun(ctx, "command IN ('reconcile','update')")
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	rows, err := d.db.QueryContext(ctx, `
+SELECT finished_at FROM runs
+ WHERE command IN ('reconcile','update') AND status='success' AND finished_at IS NOT NULL
+UNION ALL
+SELECT completed_at FROM maintenance WHERE name='full_reconciliation'`)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	defer rows.Close()
+	var latest time.Time
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return time.Time{}, false, err
+		}
+		stamp, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil {
+			return time.Time{}, false, fmt.Errorf("parse last successful reconciliation time: %w", err)
+		}
+		if stamp.After(latest) {
+			latest = stamp
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return time.Time{}, false, err
+	}
+	return latest, !latest.IsZero(), nil
 }
 
 // LastSuccessfulVerification returns the completion time of the latest
@@ -287,6 +318,55 @@ func (d *DB) PutSentinel(ctx context.Context, s Sentinel) error {
  ON CONFLICT(name) DO UPDATE SET etag=excluded.etag,last_modified=excluded.last_modified,content_sha256=excluded.content_sha256,observed_at=excluded.observed_at`,
 		s.Name, s.ETag, s.LastModified, s.ContentSHA256, s.ObservedAt.UTC().Format(time.RFC3339Nano))
 	return err
+}
+
+// RestoreReconciliation imports provider-neutral scheduling and sentinel state
+// from the canonical mirror. It does not fabricate a local run-history row.
+func (d *DB) RestoreReconciliation(ctx context.Context, completedAt time.Time, sentinels []Sentinel) error {
+	if completedAt.IsZero() {
+		return fmt.Errorf("restore reconciliation: completion time is zero")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var existingRaw string
+	err = tx.QueryRowContext(ctx, `SELECT completed_at FROM maintenance WHERE name='full_reconciliation'`).Scan(&existingRaw)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if err == nil {
+		existing, parseErr := time.Parse(time.RFC3339Nano, existingRaw)
+		if parseErr != nil {
+			return fmt.Errorf("parse restored reconciliation time: %w", parseErr)
+		}
+		if existing.After(completedAt) {
+			return tx.Commit()
+		}
+	}
+	stamp := completedAt.UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO maintenance(name,completed_at) VALUES('full_reconciliation',?)
+ ON CONFLICT(name) DO UPDATE SET completed_at=excluded.completed_at`, stamp); err != nil {
+		return err
+	}
+	for _, sentinel := range sentinels {
+		if sentinel.Name == "" {
+			return fmt.Errorf("restore reconciliation: sentinel name is empty")
+		}
+		observed := sentinel.ObservedAt
+		if observed.IsZero() {
+			observed = completedAt
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO sentinels(name,etag,last_modified,content_sha256,observed_at) VALUES(?,?,?,?,?)
+ ON CONFLICT(name) DO UPDATE SET etag=excluded.etag,last_modified=excluded.last_modified,content_sha256=excluded.content_sha256,observed_at=excluded.observed_at`,
+			sentinel.Name, sentinel.ETag, sentinel.LastModified, sentinel.ContentSHA256, observed.UTC().Format(time.RFC3339Nano)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (d *DB) RecordRelease(ctx context.Context, p model.Pointer, entries []model.Entry, localAvailable bool) error {

@@ -8,10 +8,11 @@ import (
 )
 
 const (
-	LatestKey   = "LATEST.json"
-	LeaseKey    = "leases/reconcile.json"
-	StatusReady = "available"
-	StatusGone  = "withdrawn"
+	LatestKey      = "LATEST.json"
+	LeaseKey       = "leases/reconcile.json"
+	MaintenanceKey = "operations/maintenance.json"
+	StatusReady    = "available"
+	StatusGone     = "withdrawn"
 )
 
 type Entry struct {

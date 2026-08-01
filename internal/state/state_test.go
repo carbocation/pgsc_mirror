@@ -138,6 +138,45 @@ func TestLastSuccessfulReconciliation(t *testing.T) {
 	}
 }
 
+func TestRestoreReconciliationProvidesPortableScheduleAndSentinels(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	stamp := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	sentinels := []Sentinel{
+		{Name: "score_list", ETag: `"list-1"`, ContentSHA256: "score-sha", ObservedAt: stamp},
+		{Name: "metadata", ETag: `"metadata-1"`, ContentSHA256: "metadata-sha", ObservedAt: stamp},
+	}
+	if err := db.RestoreReconciliation(ctx, stamp, sentinels); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := db.LastSuccessfulReconciliation(ctx)
+	if err != nil || !ok || !got.Equal(stamp) {
+		t.Fatalf("restored reconciliation=%s ok=%v err=%v, want %s", got, ok, err, stamp)
+	}
+	for _, want := range sentinels {
+		got, ok, err := db.Sentinel(ctx, want.Name)
+		if err != nil || !ok || got.ETag != want.ETag || got.ContentSHA256 != want.ContentSHA256 || !got.ObservedAt.Equal(stamp) {
+			t.Fatalf("restored sentinel %s: got=%+v ok=%v err=%v", want.Name, got, ok, err)
+		}
+	}
+
+	newer := stamp.Add(time.Hour)
+	if err := db.RestoreReconciliation(ctx, newer, []Sentinel{{Name: "score_list", ETag: `"new"`, ContentSHA256: "new", ObservedAt: newer}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RestoreReconciliation(ctx, stamp, []Sentinel{{Name: "score_list", ETag: `"old"`, ContentSHA256: "old", ObservedAt: stamp}}); err != nil {
+		t.Fatal(err)
+	}
+	gotSentinel, _, err := db.Sentinel(ctx, "score_list")
+	if err != nil || gotSentinel.ETag != `"new"` || gotSentinel.ContentSHA256 != "new" {
+		t.Fatalf("older restore replaced newer state: got=%+v err=%v", gotSentinel, err)
+	}
+}
+
 func TestLastSuccessfulVerification(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {

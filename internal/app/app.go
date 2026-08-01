@@ -453,6 +453,9 @@ func (a *App) reconcile(ctx context.Context, command string) (report RunReport, 
 		if err := a.recordSentinels(ctx, inv); err != nil {
 			return report, err
 		}
+		if err := a.publishMaintenanceCheckpoint(ctx, p, inv); err != nil {
+			return report, err
+		}
 		if err := a.State.ConsumeInventory(ctx, inv.checkpointID); err != nil {
 			return report, err
 		}
@@ -490,6 +493,9 @@ func (a *App) reconcile(ctx context.Context, command string) (report RunReport, 
 		return report, err
 	}
 	if err := a.recordSentinels(ctx, inv); err != nil {
+		return report, err
+	}
+	if err := a.publishMaintenanceCheckpoint(ctx, pointer, inv); err != nil {
 		return report, err
 	}
 	if err := a.State.ConsumeInventory(ctx, inv.checkpointID); err != nil {
@@ -555,6 +561,13 @@ func (a *App) Update(ctx context.Context, dryRun bool) (report RunReport, runErr
 	if a.State == nil {
 		return RunReport{}, errors.New("writable state is not open")
 	}
+	if _, err := a.restoreMaintenanceCheckpoint(ctx); err != nil {
+		return report, fmt.Errorf("restore shared maintenance state: %w", err)
+	}
+	repairedTargets, err := a.repairLaggingTargets(ctx)
+	if err != nil {
+		return report, fmt.Errorf("repair lagging targets: %w", err)
+	}
 	checkRun, err := a.State.BeginRun(ctx, "update-check")
 	if err != nil {
 		return report, err
@@ -599,7 +612,14 @@ func (a *App) Update(ctx context.Context, dryRun bool) (report RunReport, runErr
 	}
 	if scoreOK && metaOK && scoreDoc.NotModified && metaDoc.NotModified {
 		if annotation.Changed {
-			return RunReport{Command: "update", ReleaseID: annotation.ReleaseID, Changed: true, Message: "published stored-object annotations; upstream sentinels are unchanged"}, nil
+			message := "published stored-object annotations; upstream sentinels are unchanged"
+			if repairedTargets {
+				message = "published stored-object annotations and repaired lagging targets; upstream sentinels are unchanged"
+			}
+			return RunReport{Command: "update", ReleaseID: annotation.ReleaseID, Changed: true, Message: message}, nil
+		}
+		if repairedTargets {
+			return RunReport{Command: "update", ReleaseID: pointer.ReleaseID, Changed: true, Message: "repaired lagging targets; upstream sentinels are unchanged"}, nil
 		}
 		return RunReport{Command: "update", Changed: false, Message: "upstream sentinels are unchanged"}, nil
 	}
