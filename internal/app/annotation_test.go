@@ -137,7 +137,7 @@ func TestAnnotateUsesOnlyStoredObjectsAndThenNoOps(t *testing.T) {
 		t.Fatalf("missing initial progress: %+v", progress)
 	}
 	lastProgress := progress[len(progress)-1]
-	if lastProgress.Processed != 3 || lastProgress.Inspected != 3 || lastProgress.Updated != 3 || lastProgress.Unrecognized != 1 || lastProgress.Unreadable != 1 {
+	if lastProgress.Processed != 3 || lastProgress.Inspected != 3 || lastProgress.Updated != 3 || lastProgress.Unrecognized != 1 || lastProgress.Unreadable != 1 || lastProgress.Anomalies != 2 {
 		t.Fatalf("unexpected final progress: %+v", lastProgress)
 	}
 	pointer, entries, err := a.latest(context.Background())
@@ -174,6 +174,33 @@ func TestAnnotateUsesOnlyStoredObjectsAndThenNoOps(t *testing.T) {
 	if upstreamRequests.Load() != 0 {
 		t.Fatalf("no-op annotation made %d upstream request(s)", upstreamRequests.Load())
 	}
+}
+
+func TestRecordAnnotationObservationIncludesRecognizedWarningsAndErrors(t *testing.T) {
+	report := AnnotationReport{}
+	recordAnnotationObservation(&report, "PGS000001", scoreheader.Inspection{
+		Status:   scoreheader.StatusRecognized,
+		Warnings: []string{"synthetic warning"},
+	})
+	recordAnnotationObservation(&report, "PGS000002", scoreheader.Inspection{
+		Status: scoreheader.StatusRecognized,
+		Error:  "synthetic error",
+	})
+	recordAnnotationObservation(&report, "PGS000003", scoreheader.Inspection{
+		Status: scoreheader.StatusRecognized,
+	})
+
+	if report.Recognized != 3 {
+		t.Fatalf("recognized=%d, want 3", report.Recognized)
+	}
+	if len(report.Anomalies) != 2 || report.Anomalies[0].PGSID != "PGS000001" || report.Anomalies[1].PGSID != "PGS000002" {
+		t.Fatalf("unexpected anomaly details: %+v", report.Anomalies)
+	}
+	reportAnnotationProgress(func(progress AnnotationProgress) {
+		if progress.Anomalies != 2 {
+			t.Fatalf("progress anomalies=%d, want 2", progress.Anomalies)
+		}
+	}, report)
 }
 
 func TestAnnotateDryRunDoesNotPublishOrLease(t *testing.T) {

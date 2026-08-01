@@ -54,7 +54,7 @@ func TestAnnotationProgressReporterIsPeriodicAndFinishes(t *testing.T) {
 	var out strings.Builder
 	report := annotationProgressReporter(&out)
 	for _, processed := range []int{0, 100, 249, 250, 499, 500, 749, 751, 1000} {
-		report(app.AnnotationProgress{Available: 1000, Processed: processed, Inspected: processed, Updated: processed})
+		report(app.AnnotationProgress{Available: 1000, Processed: processed, Inspected: processed, Updated: processed, Anomalies: 7})
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
 	if len(lines) != 5 {
@@ -62,6 +62,9 @@ func TestAnnotationProgressReporterIsPeriodicAndFinishes(t *testing.T) {
 	}
 	if !strings.Contains(lines[0], "processed=0/1000") || !strings.Contains(lines[len(lines)-1], "processed=1000/1000") {
 		t.Fatalf("progress lacks initial or final state: %q", out.String())
+	}
+	if !strings.Contains(lines[len(lines)-1], "anomalies=7") {
+		t.Fatalf("progress lacks complete anomaly count: %q", out.String())
 	}
 }
 

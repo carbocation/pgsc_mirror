@@ -24,7 +24,7 @@ type AnnotationFailure struct {
 }
 
 // AnnotationAnomaly preserves the complete observation for a score whose
-// stored header was readable but unrecognized, or could not be decoded.
+// stored header was unrecognized, unreadable, or otherwise warning-bearing.
 type AnnotationAnomaly struct {
 	PGSID       string                 `json:"pgs_id"`
 	Observation scoreheader.Inspection `json:"observation"`
@@ -42,6 +42,7 @@ type AnnotationProgress struct {
 	Recognized   int `json:"recognized"`
 	Unrecognized int `json:"unrecognized"`
 	Unreadable   int `json:"unreadable"`
+	Anomalies    int `json:"anomalies"`
 	Failed       int `json:"failed"`
 }
 
@@ -327,13 +328,14 @@ func reportAnnotationProgress(progress AnnotationProgressReporter, report Annota
 		Recognized:   report.Recognized,
 		Unrecognized: report.Unrecognized,
 		Unreadable:   report.Unreadable,
+		Anomalies:    len(report.Anomalies),
 		Failed:       report.Failed,
 	})
 }
 
 func recordAnnotationObservation(report *AnnotationReport, pgsID string, observation scoreheader.Inspection) {
 	countAnnotationStatus(report, observation.Status)
-	if observation.Status != scoreheader.StatusRecognized {
+	if observation.Status != scoreheader.StatusRecognized || observation.Error != "" || len(observation.Warnings) > 0 {
 		report.Anomalies = append(report.Anomalies, AnnotationAnomaly{PGSID: pgsID, Observation: observation})
 	}
 }

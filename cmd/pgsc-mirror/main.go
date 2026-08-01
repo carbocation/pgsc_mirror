@@ -257,7 +257,7 @@ func annotationProgressReporter(w io.Writer) app.AnnotationProgressReporter {
 		}
 		fmt.Fprintf(w, "annotate progress: processed=%d/%d inspected=%d updated=%d unchanged=%d anomalies=%d failed=%d\n",
 			progress.Processed, progress.Available, progress.Inspected, progress.Updated, progress.Unchanged,
-			progress.Unrecognized+progress.Unreadable, progress.Failed)
+			progress.Anomalies, progress.Failed)
 		lastProcessed = progress.Processed
 	}
 }
