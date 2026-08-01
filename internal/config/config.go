@@ -67,6 +67,7 @@ type Config struct {
 	GCS         GCS       `toml:"gcs"`
 	Retention   Retention `toml:"retention"`
 	Verify      Verify    `toml:"verify"`
+	Service     Service   `toml:"service"`
 	Identity    Identity  `toml:"identity"`
 	State       State     `toml:"state"`
 }
@@ -110,8 +111,17 @@ type Retention struct {
 }
 
 type Verify struct {
-	DefaultSample int    `toml:"default_sample"`
-	Schedule      string `toml:"schedule"`
+	DefaultSample int `toml:"default_sample"`
+	// Schedule is accepted for compatibility with early configuration files.
+	// Long-running scheduling is controlled by Service.
+	Schedule string `toml:"schedule"`
+}
+
+type Service struct {
+	UpdateInterval    Duration `toml:"update_interval"`
+	ReconcileInterval Duration `toml:"reconcile_interval"`
+	VerifyInterval    Duration `toml:"verify_interval"`
+	ErrorBackoff      Duration `toml:"error_backoff"`
 }
 
 type Identity struct {
@@ -147,8 +157,14 @@ func Defaults() Config {
 		Local:     Local{Root: "./mirror"},
 		Retention: Retention{MissingGrace: Duration{30 * 24 * time.Hour}, KeepReleases: 10},
 		Verify:    Verify{DefaultSample: 100},
-		Identity:  Identity{UserAgent: "pgsc-mirror/dev"},
-		State:     State{CheckpointMaxAge: Duration{24 * time.Hour}},
+		Service: Service{
+			UpdateInterval:    Duration{6 * time.Hour},
+			ReconcileInterval: Duration{7 * 24 * time.Hour},
+			VerifyInterval:    Duration{24 * time.Hour},
+			ErrorBackoff:      Duration{5 * time.Minute},
+		},
+		Identity: Identity{UserAgent: "pgsc-mirror/dev"},
+		State:    State{CheckpointMaxAge: Duration{24 * time.Hour}},
 	}
 }
 
@@ -251,6 +267,9 @@ func (c Config) Validate() error {
 	}
 	if c.Retention.KeepReleases < 1 || c.Retention.MissingGrace.Duration < 0 {
 		return errors.New("retention.keep_releases must be positive and missing_grace must not be negative")
+	}
+	if c.Service.UpdateInterval.Duration <= 0 || c.Service.ReconcileInterval.Duration <= 0 || c.Service.VerifyInterval.Duration <= 0 || c.Service.ErrorBackoff.Duration <= 0 {
+		return errors.New("service intervals and error_backoff must be positive")
 	}
 	return nil
 }

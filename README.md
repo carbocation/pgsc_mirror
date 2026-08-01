@@ -38,12 +38,16 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 
 ## Configure
 
-Copy [`config.example.toml`](config.example.toml) and change deployment-specific values. No credentials belong in this file. GCS uses Application Default Credentials and supports requester-pays billing projects.
+Copy [`config.example.toml`](config.example.toml), change the target and operator settings, and start the binary. No credentials belong in the file. GCS uses Application Default Credentials.
 
 ```bash
 cp config.example.toml config.toml
-./pgsc-mirror.linux --config config.toml plan
+./pgsc-mirror.linux --config config.toml
 ```
+
+That is the normal operating interface. The process synchronizes immediately, keeps the mirror current while it is running, and retries transient failures without exiting. `Ctrl+C`, a reboot, or several days of downtime is safe: start the same command again and it resumes durable partial work where possible, checks what changed, and catches up. Published releases are atomic, so interruption cannot make an incomplete release current.
+
+The default maintenance schedule is a lightweight upstream change check every six hours, a complete reconciliation every seven days, and verification of a deterministic sample every day. These intervals live under `[service]` in TOML. A full reconciliation at first startup—or when overdue after downtime—also repairs local operational state from the published mirror.
 
 Important settings include:
 
@@ -58,6 +62,10 @@ Important settings include:
 - `state.work_dir`: durable local scratch for resumable scoring downloads and provider upload staging. Keep it on persistent disk; it defaults beside `state.path`.
 - `state.checkpoint_max_age`: maximum age for resuming an interrupted checksum inventory. A completed reconciliation consumes its checkpoint, so the next full audit still refetches every sidecar.
 - `retention.missing_grace`: withdrawn IDs and unreferenced data remain protected until this period expires.
+- `service.update_interval`: how often the running process performs a lightweight upstream change check.
+- `service.reconcile_interval`: how often it performs a complete checksum-sidecar audit, including after downtime.
+- `service.verify_interval`: how often it samples the completed mirror for verification.
+- `service.error_backoff`: how long it waits before retrying a failed maintenance operation.
 
 All institution-specific paths, projects, buckets, prefixes, billing projects, contacts, and identities live in TOML configuration.
 
@@ -65,6 +73,7 @@ All institution-specific paths, projects, buckets, prefixes, billing projects, c
 
 | Command | Behavior |
 |---|---|
+| `run` | Default when no command is supplied. Continuously catches up and maintains the mirror until stopped. |
 | `probe` | Checks only explicitly named IDs with HEAD, a streaming size cap, and compressed-byte MD5 verification; optionally runs a self-cleaning GCS conditional-write smoke test. |
 | `plan` | Read-only upstream inventory and proposed changes. |
 | `reconcile` | Full checksum-sidecar audit and repair. Detects in-place score revisions. |
@@ -75,11 +84,11 @@ All institution-specific paths, projects, buckets, prefixes, billing projects, c
 | `rebuild-state` | Reconstructs SQLite exclusively from immutable release manifests. |
 | `gc` | Conservative retention report. It is a dry run unless `--apply` is explicit. |
 
-Every command supports `--config`; reports support `--json`. Mutating commands support `--dry-run`. `gc` deliberately uses the separate `--apply` switch.
+Every command supports `--config`; reports support `--json`. Mutating one-shot commands support `--dry-run`. `gc` deliberately uses the separate `--apply` switch. The explicit form `pgsc-mirror --config config.toml run` is equivalent to omitting `run`.
 
 `probe` is the bounded preflight command. Supply one or more repeatable `--pgs-id` flags and a positive `--max-size` such as `100MiB`. It fetches the score list once, never fetches the bulk metadata CSV, and removes every temporary scoring file after checking the compressed bytes. A known or streamed size above the cap, a missing ID, an incomplete response, or an MD5 mismatch makes the probe fail after it has reported all requested IDs. `--gcs-smoke-test` runs only after every upstream check succeeds; it creates, reads, conditionally replaces, tests a stale generation, and deletes one `probes/<run-id>.json` object. Use `--report` with a JSON filename or an existing directory.
 
-`update` cannot detect a scoring-file revision when neither sentinel changes. Schedule a periodic full `reconcile` independently (for example, weekly) in addition to more frequent `update` runs. Scheduling stays outside the binary: cron, systemd timers, Cloud Run Jobs, Kubernetes Jobs, and equivalent one-shot systems all work.
+The continuous mode combines lightweight `update`, periodic full `reconcile`, and periodic `verify` operations. The individual commands remain available for diagnostics, manually initiated work, and external one-shot schedulers, but they are not required for a normal long-lived installation.
 
 ## Derived workflows and private extensions
 

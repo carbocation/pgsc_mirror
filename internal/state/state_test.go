@@ -104,3 +104,59 @@ func TestOpenMarksAbandonedRunInterrupted(t *testing.T) {
 		t.Fatalf("abandoned run status is %q", summary.LastRunStatus)
 	}
 }
+
+func TestLastSuccessfulReconciliation(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if _, ok, err := db.LastSuccessfulReconciliation(ctx); err != nil || ok {
+		t.Fatalf("unexpected initial result: ok=%v err=%v", ok, err)
+	}
+	check, err := db.BeginRun(ctx, "update-check")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.FinishRun(ctx, check, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := db.LastSuccessfulReconciliation(ctx); err != nil || ok {
+		t.Fatalf("cheap update counted as reconciliation: ok=%v err=%v", ok, err)
+	}
+	full, err := db.BeginRun(ctx, "reconcile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.FinishRun(ctx, full, nil); err != nil {
+		t.Fatal(err)
+	}
+	stamp, ok, err := db.LastSuccessfulReconciliation(ctx)
+	if err != nil || !ok || stamp.IsZero() {
+		t.Fatalf("successful reconciliation missing: stamp=%s ok=%v err=%v", stamp, ok, err)
+	}
+}
+
+func TestLastSuccessfulVerification(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if _, ok, err := db.LastSuccessfulVerification(ctx); err != nil || ok {
+		t.Fatalf("unexpected initial result: ok=%v err=%v", ok, err)
+	}
+	run, err := db.BeginRun(ctx, "verify")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.FinishRun(ctx, run, nil); err != nil {
+		t.Fatal(err)
+	}
+	stamp, ok, err := db.LastSuccessfulVerification(ctx)
+	if err != nil || !ok || stamp.IsZero() {
+		t.Fatalf("successful verification missing: stamp=%s ok=%v err=%v", stamp, ok, err)
+	}
+}

@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/carbocation/pgsc_mirror/internal/app"
 	"github.com/carbocation/pgsc_mirror/internal/config"
@@ -27,7 +28,7 @@ var (
 	buildDate = "unknown"
 )
 
-var commands = map[string]bool{"probe": true, "plan": true, "reconcile": true, "update": true, "pull": true, "verify": true, "status": true, "rebuild-state": true, "gc": true}
+var commands = map[string]bool{"run": true, "probe": true, "plan": true, "reconcile": true, "update": true, "pull": true, "verify": true, "status": true, "rebuild-state": true, "gc": true}
 
 type stringList []string
 
@@ -96,7 +97,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error:", err)
 		return 2
 	}
-	mutating := ((command == "reconcile" || command == "update" || command == "pull" || command == "rebuild-state") && !o.dryRun) || command == "status"
+	if command == "run" && cfg.Transfer.SidecarLimit != 0 {
+		fmt.Fprintln(stderr, "error: run requires transfer.sidecar_limit = 0")
+		return 2
+	}
+	mutating := command == "run" || ((command == "reconcile" || command == "update" || command == "pull" || command == "rebuild-state") && !o.dryRun) || command == "status"
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	a, err := app.New(ctx, cfg, mutating)
@@ -105,6 +110,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	defer a.Close()
+	if command == "run" {
+		if err := a.Run(ctx, serviceReporter(stdout, o.json)); err != nil {
+			fmt.Fprintln(stderr, "error:", err)
+			return 1
+		}
+		return 0
+	}
 	var result any
 	switch command {
 	case "probe":
@@ -156,19 +168,81 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 func splitCommand(args []string) (string, []string, error) {
 	if len(args) == 0 {
-		return "", nil, errors.New("a command is required")
+		return "run", nil, nil
 	}
-	for i, arg := range args {
+	valueFlags := map[string]bool{
+		"-config": true, "--config": true, "-sample": true, "--sample": true,
+		"-pgs-id": true, "--pgs-id": true, "-max-size": true, "--max-size": true,
+		"-report": true, "--report": true,
+	}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if valueFlags[arg] {
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
 		if arg == "version" || commands[arg] {
 			return arg, append(append([]string{}, args[:i]...), args[i+1:]...), nil
 		}
+	}
+	if strings.HasPrefix(args[0], "-") {
+		return "run", append([]string(nil), args...), nil
 	}
 	return "", nil, fmt.Errorf("unknown command %q", args[0])
 }
 
 func usage(w io.Writer) {
-	fmt.Fprintln(w, "usage: pgsc-mirror [global flags] <command> [flags]")
-	fmt.Fprintln(w, "commands: probe, plan, reconcile, update, pull, verify, status, rebuild-state, gc, version")
+	fmt.Fprintln(w, "usage: pgsc-mirror --config FILE [run]")
+	fmt.Fprintln(w, "       pgsc-mirror [global flags] <command> [flags]")
+	fmt.Fprintln(w, "commands: run, probe, plan, reconcile, update, pull, verify, status, rebuild-state, gc, version")
+}
+
+func serviceReporter(w io.Writer, structured bool) app.ServiceReporter {
+	if structured {
+		enc := json.NewEncoder(w)
+		enc.SetEscapeHTML(false)
+		return func(event app.ServiceEvent) error { return enc.Encode(event) }
+	}
+	return func(event app.ServiceEvent) error {
+		stamp := event.At.Format(time.RFC3339)
+		switch event.Status {
+		case app.ServiceStarted:
+			_, err := fmt.Fprintf(w, "%s service started\n", stamp)
+			return err
+		case app.ServiceStopped:
+			_, err := fmt.Fprintf(w, "%s service stopped\n", stamp)
+			return err
+		case app.ServiceFailed:
+			_, err := fmt.Fprintf(w, "%s %s failed: %s; retry at %s\n", stamp, event.Operation, event.Error, formatEventTime(event.NextAt))
+			return err
+		}
+		summary := "completed"
+		switch result := event.Result.(type) {
+		case app.RunReport:
+			summary = result.Message
+			if result.ReleaseID != "" {
+				summary += "; release " + result.ReleaseID
+			}
+		case app.VerifyReport:
+			checked := 0
+			for _, target := range result.Targets {
+				checked += target.Checked
+			}
+			summary = fmt.Sprintf("verified %d object(s)", checked)
+		}
+		_, err := fmt.Fprintf(w, "%s %s succeeded: %s; next at %s\n", stamp, event.Operation, summary, formatEventTime(event.NextAt))
+		return err
+	}
+}
+
+func formatEventTime(t *time.Time) string {
+	if t == nil {
+		return "unscheduled"
+	}
+	return t.Format(time.RFC3339)
 }
 
 func printHuman(w io.Writer, v any) {
