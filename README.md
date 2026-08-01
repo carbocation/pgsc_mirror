@@ -2,7 +2,7 @@
 
 `pgsc-mirror` is a public, provider-neutral Go application for maintaining verified local and/or Google Cloud Storage mirrors of PGS Catalog scoring files harmonized to GRCh38. It preserves byte-identical upstream gzip files, publishes deterministic immutable release manifests, and advances a small `LATEST.json` pointer only after every expected object is present.
 
-This project is independent and is not affiliated with or endorsed by EMBL-EBI, the PGS Catalog, or its funders. PGS Catalog score licenses vary. The mirror records license metadata but does not replace the upstream license terms; operators and downstream users remain responsible for complying with them.
+This project is independent and is not affiliated with or endorsed by EMBL-EBI, the PGS Catalog, or its funders. The repository's MIT license applies to the `pgsc-mirror` software, not to PGS Catalog data. PGS Catalog score licenses vary; the mirror records their license metadata but does not replace upstream terms. Operators and downstream users remain responsible for complying with those terms.
 
 ## Safety model
 
