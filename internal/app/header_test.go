@@ -7,12 +7,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pgsc-mirror/pgsc-mirror/internal/config"
-	"github.com/pgsc-mirror/pgsc-mirror/internal/manifest"
-	"github.com/pgsc-mirror/pgsc-mirror/internal/model"
-	"github.com/pgsc-mirror/pgsc-mirror/internal/store"
-	localstore "github.com/pgsc-mirror/pgsc-mirror/internal/store/local"
-	"github.com/pgsc-mirror/pgsc-mirror/pkg/scoreheader"
+	"github.com/carbocation/pgsc_mirror/internal/config"
+	"github.com/carbocation/pgsc_mirror/internal/manifest"
+	"github.com/carbocation/pgsc_mirror/internal/model"
+	"github.com/carbocation/pgsc_mirror/internal/store"
+	localstore "github.com/carbocation/pgsc_mirror/internal/store/local"
+	"github.com/carbocation/pgsc_mirror/pkg/scoreheader"
 )
 
 const harmonizedHeaderFixture = "###PGS CATALOG SCORING FILE\n#format_version=2.0\n#pgs_id=PGS000001\n##HARMONIZATION DETAILS\n#HmPOS_build=GRCh38\nrsID\teffect_allele\tother_allele\teffect_weight\thm_source\thm_rsID\thm_chr\thm_pos\nrs1\tA\tG\t0.25\tENSEMBL\trs1\t1\t42\n"

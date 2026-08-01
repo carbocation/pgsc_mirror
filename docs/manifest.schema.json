@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/pgsc-mirror/pgsc-mirror/docs/manifest.schema.json",
+  "$id": "https://raw.githubusercontent.com/carbocation/pgsc_mirror/main/docs/manifest.schema.json",
   "title": "pgsc-mirror manifest entry",
   "type": "object",
   "additionalProperties": false,

@@ -1,4 +1,4 @@
-module github.com/pgsc-mirror/pgsc-mirror
+module github.com/carbocation/pgsc_mirror
 
 go 1.25.0
 

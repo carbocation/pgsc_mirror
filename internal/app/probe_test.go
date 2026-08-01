@@ -16,10 +16,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pgsc-mirror/pgsc-mirror/internal/catalog"
-	"github.com/pgsc-mirror/pgsc-mirror/internal/config"
-	"github.com/pgsc-mirror/pgsc-mirror/internal/store"
-	"github.com/pgsc-mirror/pgsc-mirror/internal/transfer"
+	"github.com/carbocation/pgsc_mirror/internal/catalog"
+	"github.com/carbocation/pgsc_mirror/internal/config"
+	"github.com/carbocation/pgsc_mirror/internal/store"
+	"github.com/carbocation/pgsc_mirror/internal/transfer"
 )
 
 func probeMD5(body []byte) string {

@@ -3,7 +3,7 @@ package planner
 import (
 	"testing"
 
-	"github.com/pgsc-mirror/pgsc-mirror/internal/model"
+	"github.com/carbocation/pgsc_mirror/internal/model"
 )
 
 func TestPlanTransitions(t *testing.T) {

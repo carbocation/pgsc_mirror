@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pgsc-mirror/pgsc-mirror/internal/manifest"
-	"github.com/pgsc-mirror/pgsc-mirror/internal/model"
-	"github.com/pgsc-mirror/pgsc-mirror/internal/state"
-	"github.com/pgsc-mirror/pgsc-mirror/internal/store"
+	"github.com/carbocation/pgsc_mirror/internal/manifest"
+	"github.com/carbocation/pgsc_mirror/internal/model"
+	"github.com/carbocation/pgsc_mirror/internal/state"
+	"github.com/carbocation/pgsc_mirror/internal/store"
 )
 
 func (a *App) Verify(ctx context.Context, full bool, sample int) (VerifyReport, error) {

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/pgsc-mirror/pgsc-mirror/docs/latest.schema.json",
+  "$id": "https://raw.githubusercontent.com/carbocation/pgsc_mirror/main/docs/latest.schema.json",
   "title": "pgsc-mirror latest release pointer",
   "type": "object",
   "additionalProperties": false,

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pgsc-mirror/pgsc-mirror/internal/model"
+	"github.com/carbocation/pgsc_mirror/internal/model"
 )
 
 func TestRecordAndRebuild(t *testing.T) {

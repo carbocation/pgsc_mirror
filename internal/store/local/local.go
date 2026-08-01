@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pgsc-mirror/pgsc-mirror/internal/store"
+	"github.com/carbocation/pgsc_mirror/internal/store"
 )
 
 type Store struct{ root string }

@@ -15,7 +15,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/pgsc-mirror/pgsc-mirror/internal/transfer"
+	"github.com/carbocation/pgsc_mirror/internal/transfer"
 )
 
 var (

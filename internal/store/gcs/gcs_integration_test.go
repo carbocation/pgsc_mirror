@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pgsc-mirror/pgsc-mirror/internal/store"
+	"github.com/carbocation/pgsc_mirror/internal/store"
 )
 
 func TestIntegrationConditionalRoundTrip(t *testing.T) {

@@ -14,7 +14,7 @@ import (
 	"strings"
 
 	"cloud.google.com/go/storage"
-	"github.com/pgsc-mirror/pgsc-mirror/internal/store"
+	"github.com/carbocation/pgsc_mirror/internal/store"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 )

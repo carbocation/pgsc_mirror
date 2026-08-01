@@ -4,7 +4,7 @@ package model
 import (
 	"time"
 
-	"github.com/pgsc-mirror/pgsc-mirror/pkg/scoreheader"
+	"github.com/carbocation/pgsc_mirror/pkg/scoreheader"
 )
 
 const (

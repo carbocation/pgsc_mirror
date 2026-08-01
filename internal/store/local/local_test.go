@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/pgsc-mirror/pgsc-mirror/internal/store"
+	"github.com/carbocation/pgsc_mirror/internal/store"
 )
 
 func TestConditionalWrites(t *testing.T) {

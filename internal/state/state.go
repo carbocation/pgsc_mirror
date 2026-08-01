@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pgsc-mirror/pgsc-mirror/internal/model"
+	"github.com/carbocation/pgsc_mirror/internal/model"
 	_ "modernc.org/sqlite"
 )
 

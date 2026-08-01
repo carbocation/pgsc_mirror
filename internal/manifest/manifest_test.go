@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pgsc-mirror/pgsc-mirror/internal/model"
-	"github.com/pgsc-mirror/pgsc-mirror/pkg/scoreheader"
+	"github.com/carbocation/pgsc_mirror/internal/model"
+	"github.com/carbocation/pgsc_mirror/pkg/scoreheader"
 )
 
 func TestEncodeDeterministic(t *testing.T) {

@@ -16,9 +16,9 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/pgsc-mirror/pgsc-mirror/internal/app"
-	"github.com/pgsc-mirror/pgsc-mirror/internal/config"
-	"github.com/pgsc-mirror/pgsc-mirror/internal/planner"
+	"github.com/carbocation/pgsc_mirror/internal/app"
+	"github.com/carbocation/pgsc_mirror/internal/config"
+	"github.com/carbocation/pgsc_mirror/internal/planner"
 )
 
 var (

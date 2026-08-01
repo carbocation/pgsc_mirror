@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/pgsc-mirror/pgsc-mirror/internal/app"
+	"github.com/carbocation/pgsc_mirror/internal/app"
 )
 
 func TestParseByteSize(t *testing.T) {

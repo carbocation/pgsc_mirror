@@ -16,17 +16,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pgsc-mirror/pgsc-mirror/internal/catalog"
-	"github.com/pgsc-mirror/pgsc-mirror/internal/config"
-	"github.com/pgsc-mirror/pgsc-mirror/internal/manifest"
-	"github.com/pgsc-mirror/pgsc-mirror/internal/model"
-	"github.com/pgsc-mirror/pgsc-mirror/internal/planner"
-	"github.com/pgsc-mirror/pgsc-mirror/internal/state"
-	"github.com/pgsc-mirror/pgsc-mirror/internal/store"
-	gcsstore "github.com/pgsc-mirror/pgsc-mirror/internal/store/gcs"
-	localstore "github.com/pgsc-mirror/pgsc-mirror/internal/store/local"
-	"github.com/pgsc-mirror/pgsc-mirror/internal/transfer"
-	"github.com/pgsc-mirror/pgsc-mirror/pkg/scoreheader"
+	"github.com/carbocation/pgsc_mirror/internal/catalog"
+	"github.com/carbocation/pgsc_mirror/internal/config"
+	"github.com/carbocation/pgsc_mirror/internal/manifest"
+	"github.com/carbocation/pgsc_mirror/internal/model"
+	"github.com/carbocation/pgsc_mirror/internal/planner"
+	"github.com/carbocation/pgsc_mirror/internal/state"
+	"github.com/carbocation/pgsc_mirror/internal/store"
+	gcsstore "github.com/carbocation/pgsc_mirror/internal/store/gcs"
+	localstore "github.com/carbocation/pgsc_mirror/internal/store/local"
+	"github.com/carbocation/pgsc_mirror/internal/transfer"
+	"github.com/carbocation/pgsc_mirror/pkg/scoreheader"
 )
 
 type target struct {

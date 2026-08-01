@@ -14,9 +14,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/pgsc-mirror/pgsc-mirror/internal/catalog"
-	"github.com/pgsc-mirror/pgsc-mirror/internal/store"
-	"github.com/pgsc-mirror/pgsc-mirror/internal/transfer"
+	"github.com/carbocation/pgsc_mirror/internal/catalog"
+	"github.com/carbocation/pgsc_mirror/internal/store"
+	"github.com/carbocation/pgsc_mirror/internal/transfer"
 )
 
 var ErrProbeFailed = errors.New("probe failed")

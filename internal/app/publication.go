@@ -13,10 +13,10 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/pgsc-mirror/pgsc-mirror/internal/manifest"
-	"github.com/pgsc-mirror/pgsc-mirror/internal/model"
-	"github.com/pgsc-mirror/pgsc-mirror/internal/store"
-	"github.com/pgsc-mirror/pgsc-mirror/pkg/scoreheader"
+	"github.com/carbocation/pgsc_mirror/internal/manifest"
+	"github.com/carbocation/pgsc_mirror/internal/model"
+	"github.com/carbocation/pgsc_mirror/internal/store"
+	"github.com/carbocation/pgsc_mirror/pkg/scoreheader"
 )
 
 func (a *App) ensureBlobs(ctx context.Context, entries []model.Entry) error {
