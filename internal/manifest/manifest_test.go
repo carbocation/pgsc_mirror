@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/pgsc-mirror/pgsc-mirror/internal/model"
+	"github.com/pgsc-mirror/pgsc-mirror/pkg/scoreheader"
 )
 
 func TestEncodeDeterministic(t *testing.T) {
@@ -41,5 +42,22 @@ func TestEncodeDeterministic(t *testing.T) {
 	idD, _ := ReleaseID(now, entries, []byte("metadata-b"))
 	if idC == idD {
 		t.Fatal("snapshot content did not affect release ID")
+	}
+	withHeader := append([]model.Entry(nil), entries...)
+	withHeader[0].Header = &scoreheader.Inspection{InspectorVersion: scoreheader.InspectorVersion, Status: scoreheader.StatusRecognized, Type: scoreheader.TypeHarmonizedV2, SchemaSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+	idE, _ := ReleaseID(now, withHeader)
+	if idE == idA {
+		t.Fatal("header observation did not affect release ID")
+	}
+	encoded, _, err := Encode(withHeader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTrip, err := Decode(bytes.NewReader(encoded))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if roundTrip[1].Header == nil || roundTrip[1].Header.Type != scoreheader.TypeHarmonizedV2 {
+		t.Fatalf("header observation was not preserved: %+v", roundTrip)
 	}
 }

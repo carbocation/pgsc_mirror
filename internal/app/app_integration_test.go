@@ -25,6 +25,7 @@ import (
 	"github.com/pgsc-mirror/pgsc-mirror/internal/store"
 	localstore "github.com/pgsc-mirror/pgsc-mirror/internal/store/local"
 	"github.com/pgsc-mirror/pgsc-mirror/internal/transfer"
+	"github.com/pgsc-mirror/pgsc-mirror/pkg/scoreheader"
 )
 
 type syntheticUpstream struct {
@@ -406,6 +407,64 @@ func TestReconcileLifecycleAndRecovery(t *testing.T) {
 	}
 	if status.State.Available != 2 || status.State.LatestRelease == "" {
 		t.Fatalf("bad rebuilt status %+v", status)
+	}
+}
+
+func TestReconcileRecordsHeaderVariants(t *testing.T) {
+	up := newSyntheticUpstream()
+	up.set("PGS000001", harmonizedHeaderFixture, "CC0", true)
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	cfg := integrationConfig(t.TempDir(), srv.URL)
+	ctx := context.Background()
+	a, err := New(ctx, cfg, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	clock := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	a.now = func() time.Time { return clock }
+	if _, err := a.Reconcile(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	pointer, entries, err := a.latest(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pointer.HeaderInspectorVersion != scoreheader.InspectorVersion {
+		t.Fatalf("pointer header inspector version=%d, want %d", pointer.HeaderInspectorVersion, scoreheader.InspectorVersion)
+	}
+	if len(entries) != 1 || entries[0].Header == nil {
+		t.Fatalf("header observation missing: %+v", entries)
+	}
+	first := entries[0].Header
+	if first.Type != scoreheader.TypeHarmonizedV2 || first.Status != scoreheader.StatusRecognized {
+		t.Fatalf("unexpected header observation: %+v", first)
+	}
+
+	variant := strings.Replace(harmonizedHeaderFixture,
+		"hm_source\thm_rsID\thm_chr\thm_pos",
+		"hm_source\thm_rsID\thm_chr\thm_pos\thm_match_chr", 1)
+	variant = strings.Replace(variant, "ENSEMBL\trs1\t1\t42", "ENSEMBL\trs1\t1\t42\tTrue", 1)
+	up.set("PGS000001", variant, "CC0", true)
+	clock = clock.Add(time.Minute)
+	if _, err := a.Update(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	_, entries, err = a.latest(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := entries[0].Header
+	if second == nil || second.Type != first.Type || second.SchemaSHA256 == first.SchemaSHA256 {
+		t.Fatalf("header variant was not distinguished: first=%+v second=%+v", first, second)
+	}
+	status, err := a.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(status.Targets) != 1 || len(status.Targets[0].HeaderSchemas) != 1 || status.Targets[0].HeaderSchemas[0].SchemaSHA256 != second.SchemaSHA256 {
+		t.Fatalf("status did not expose the current header schema: %+v", status)
 	}
 }
 

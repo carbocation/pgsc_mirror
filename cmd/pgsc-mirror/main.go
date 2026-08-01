@@ -209,6 +209,9 @@ func printHuman(w io.Writer, v any) {
 		if r.ScoreListChanged {
 			fmt.Fprintln(w, "score-list snapshot changed")
 		}
+		if r.HeaderInspections > 0 {
+			fmt.Fprintf(w, "scoring headers needing inspection: %d\n", r.HeaderInspections)
+		}
 		keys := make([]string, 0, len(r.Counts))
 		for k := range r.Counts {
 			keys = append(keys, string(k))
@@ -249,6 +252,18 @@ func printHuman(w io.Writer, v any) {
 				fmt.Fprintf(w, "%s: %s\n", t.Target, t.Error)
 			} else {
 				fmt.Fprintf(w, "%s: release %s (%d entries)\n", t.Target, t.ReleaseID, t.Entries)
+				if len(t.HeaderSchemas) > 0 {
+					for _, schema := range t.HeaderSchemas {
+						fingerprint := schema.SchemaSHA256
+						if len(fingerprint) > 12 {
+							fingerprint = fingerprint[:12]
+						}
+						fmt.Fprintf(w, "  header %-40s %s %d\n", schema.Type, fingerprint, schema.Count)
+					}
+				}
+				if t.HeaderAnomalies > 0 || t.UninspectedHeaders > 0 {
+					fmt.Fprintf(w, "  header anomalies=%d uninspected=%d\n", t.HeaderAnomalies, t.UninspectedHeaders)
+				}
 			}
 		}
 	case app.GCReport:

@@ -26,6 +26,7 @@ import (
 	gcsstore "github.com/pgsc-mirror/pgsc-mirror/internal/store/gcs"
 	localstore "github.com/pgsc-mirror/pgsc-mirror/internal/store/local"
 	"github.com/pgsc-mirror/pgsc-mirror/internal/transfer"
+	"github.com/pgsc-mirror/pgsc-mirror/pkg/scoreheader"
 )
 
 type target struct {
@@ -43,14 +44,15 @@ type App struct {
 }
 
 type PlanReport struct {
-	PreviousRelease  string               `json:"previous_release,omitempty"`
-	ScoreCount       int                  `json:"score_count"`
-	TotalScoreCount  int                  `json:"total_score_count"`
-	Truncated        bool                 `json:"truncated"`
-	ScoreListChanged bool                 `json:"score_list_changed"`
-	MetadataChanged  bool                 `json:"metadata_changed"`
-	Changes          []planner.Change     `json:"changes"`
-	Counts           map[planner.Kind]int `json:"counts"`
+	PreviousRelease   string               `json:"previous_release,omitempty"`
+	ScoreCount        int                  `json:"score_count"`
+	TotalScoreCount   int                  `json:"total_score_count"`
+	Truncated         bool                 `json:"truncated"`
+	ScoreListChanged  bool                 `json:"score_list_changed"`
+	MetadataChanged   bool                 `json:"metadata_changed"`
+	HeaderInspections int                  `json:"header_inspections_needed"`
+	Changes           []planner.Change     `json:"changes"`
+	Counts            map[planner.Kind]int `json:"counts"`
 }
 
 type RunReport struct {
@@ -78,11 +80,21 @@ type StatusReport struct {
 }
 
 type TargetStatus struct {
-	Target      string     `json:"target"`
-	ReleaseID   string     `json:"release_id,omitempty"`
-	PublishedAt *time.Time `json:"published_at,omitempty"`
-	Entries     int        `json:"entries,omitempty"`
-	Error       string     `json:"error,omitempty"`
+	Target             string         `json:"target"`
+	ReleaseID          string         `json:"release_id,omitempty"`
+	PublishedAt        *time.Time     `json:"published_at,omitempty"`
+	Entries            int            `json:"entries,omitempty"`
+	HeaderTypes        map[string]int `json:"header_types,omitempty"`
+	HeaderSchemas      []HeaderSchema `json:"header_schemas,omitempty"`
+	HeaderAnomalies    int            `json:"header_anomalies,omitempty"`
+	UninspectedHeaders int            `json:"uninspected_headers,omitempty"`
+	Error              string         `json:"error,omitempty"`
+}
+
+type HeaderSchema struct {
+	Type         string `json:"type"`
+	SchemaSHA256 string `json:"schema_sha256"`
+	Count        int    `json:"count"`
 }
 
 type GCItem struct {
@@ -288,6 +300,9 @@ func (a *App) inventory(ctx context.Context, previous []model.Entry, allowLimit,
 						e.UpstreamETag = prior.UpstreamETag
 						e.UpstreamLastModified = prior.UpstreamLastModified
 						e.GCSGeneration = prior.GCSGeneration
+						if prior.Header.Current() {
+							e.Header = prior.Header
+						}
 					}
 				}
 				entries[i] = e
@@ -354,7 +369,7 @@ func (a *App) Plan(ctx context.Context) (PlanReport, error) {
 	if err != nil {
 		return PlanReport{}, err
 	}
-	report := PlanReport{PreviousRelease: p.ReleaseID, ScoreCount: len(inv.ids), TotalScoreCount: inv.totalIDs, Truncated: inv.truncated, ScoreListChanged: scoreListChanged, MetadataChanged: metadataChanged, Changes: changes, Counts: map[planner.Kind]int{}}
+	report := PlanReport{PreviousRelease: p.ReleaseID, ScoreCount: len(inv.ids), TotalScoreCount: inv.totalIDs, Truncated: inv.truncated, ScoreListChanged: scoreListChanged, MetadataChanged: metadataChanged, HeaderInspections: headerInspectionsNeeded(inv.entries), Changes: changes, Counts: map[planner.Kind]int{}}
 	for _, c := range changes {
 		report.Counts[c.Kind]++
 	}
@@ -366,7 +381,7 @@ func (a *App) Reconcile(ctx context.Context, dryRun bool) (report RunReport, run
 	if dryRun {
 		p, err := a.Plan(ctx)
 		report.Plan = &p
-		report.Changed = planner.HasChanges(p.Changes) || p.MetadataChanged || p.ScoreListChanged
+		report.Changed = planner.HasChanges(p.Changes) || p.MetadataChanged || p.ScoreListChanged || p.HeaderInspections > 0
 		report.Message = "dry run; no objects written"
 		return report, err
 	}
@@ -422,6 +437,7 @@ func (a *App) reconcile(ctx context.Context, command string) (report RunReport, 
 		return report, fmt.Errorf("prune scoring-file scratch: %w", err)
 	}
 	changes := planner.Plan(previous, inv.entries)
+	headerInspections := headerInspectionsNeeded(inv.entries)
 	metadataChanged, err := a.snapshotChanged(ctx, p, model.MetadataKey(p.ReleaseID), inv.metadata)
 	if err != nil {
 		return report, err
@@ -430,7 +446,7 @@ func (a *App) reconcile(ctx context.Context, command string) (report RunReport, 
 	if err != nil {
 		return report, err
 	}
-	if !planner.HasChanges(changes) && !metadataChanged && !scoreListChanged {
+	if !planner.HasChanges(changes) && !metadataChanged && !scoreListChanged && headerInspections == 0 {
 		if err := a.recordSentinels(ctx, inv); err != nil {
 			return report, err
 		}
@@ -463,7 +479,7 @@ func (a *App) reconcile(ctx context.Context, command string) (report RunReport, 
 	}
 	scoreSum := sha256.Sum256(inv.scoreDoc.Body)
 	metadataSum := sha256.Sum256(inv.metadata)
-	pointer := model.Pointer{ReleaseID: releaseID, ManifestKey: model.ManifestKey(releaseID), ManifestSHA256: manifestSHA, ScoreListSHA256: hex.EncodeToString(scoreSum[:]), MetadataSHA256: hex.EncodeToString(metadataSum[:]), PublishedAt: now, EntryCount: len(inv.entries), GenomeBuild: a.Config.GenomeBuild}
+	pointer := model.Pointer{ReleaseID: releaseID, ManifestKey: model.ManifestKey(releaseID), ManifestSHA256: manifestSHA, ScoreListSHA256: hex.EncodeToString(scoreSum[:]), MetadataSHA256: hex.EncodeToString(metadataSum[:]), PublishedAt: now, EntryCount: len(inv.entries), GenomeBuild: a.Config.GenomeBuild, HeaderInspectorVersion: scoreheader.InspectorVersion}
 	if err := a.publish(ctx, pointer, inv.scoreDoc.Body, inv.metadata, manifestBytes); err != nil {
 		return report, err
 	}
@@ -531,7 +547,7 @@ func (a *App) recordSentinels(ctx context.Context, inv inventory) error {
 func (a *App) Update(ctx context.Context, dryRun bool) (report RunReport, runErr error) {
 	if dryRun {
 		p, err := a.Plan(ctx)
-		return RunReport{Command: "update", Changed: planner.HasChanges(p.Changes) || p.MetadataChanged || p.ScoreListChanged, Message: "dry run; no objects written", Plan: &p}, err
+		return RunReport{Command: "update", Changed: planner.HasChanges(p.Changes) || p.MetadataChanged || p.ScoreListChanged || p.HeaderInspections > 0, Message: "dry run; no objects written", Plan: &p}, err
 	}
 	if a.State == nil {
 		return RunReport{}, errors.New("writable state is not open")
@@ -546,6 +562,17 @@ func (a *App) Update(ctx context.Context, dryRun bool) (report RunReport, runErr
 			_ = a.State.FinishRun(context.Background(), checkRun, runErr)
 		}
 	}()
+	pointer, _, err := a.readPointer(ctx, a.targets[0].Store)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return RunReport{}, err
+	}
+	if err == nil && pointer.HeaderInspectorVersion < scoreheader.InspectorVersion {
+		if err := a.State.FinishRun(ctx, checkRun, nil); err != nil {
+			return report, err
+		}
+		finishCheck = false
+		return a.reconcile(ctx, "update")
+	}
 	scoreS, scoreOK, err := a.State.Sentinel(ctx, "score_list")
 	if err != nil {
 		return RunReport{}, err
@@ -570,6 +597,16 @@ func (a *App) Update(ctx context.Context, dryRun bool) (report RunReport, runErr
 	}
 	finishCheck = false
 	return a.reconcile(ctx, "update")
+}
+
+func headerInspectionsNeeded(entries []model.Entry) int {
+	count := 0
+	for i := range entries {
+		if entries[i].Status == model.StatusReady && !entries[i].Header.Current() {
+			count++
+		}
+	}
+	return count
 }
 
 type heldLease struct {

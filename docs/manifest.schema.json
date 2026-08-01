@@ -22,7 +22,37 @@
     "last_seen_at": {"type": "string", "format": "date-time"},
     "status": {"enum": ["available", "withdrawn"]},
     "license": {"type": "string"},
-    "gcs_generation": {"type": "integer", "minimum": 0}
+    "gcs_generation": {"type": "integer", "minimum": 0},
+    "header": {"$ref": "#/$defs/header_inspection"}
+  },
+  "$defs": {
+    "header_inspection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inspector_version", "status", "type", "comment_lines"],
+      "properties": {
+        "inspector_version": {"type": "integer", "minimum": 1},
+        "status": {"enum": ["recognized", "unrecognized", "unreadable"]},
+        "type": {
+          "enum": [
+            "pgs-catalog-harmonized-v2",
+            "pgs-catalog-harmonized-versioned",
+            "pgs-catalog-harmonized-unversioned",
+            "pgs-catalog-formatted-v2",
+            "pgs-catalog-formatted",
+            "unknown"
+          ]
+        },
+        "format_version": {"type": "string"},
+        "delimiter": {"enum": ["tab", "comma", "whitespace"]},
+        "schema_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "columns": {"type": "array", "items": {"type": "string"}},
+        "metadata_keys": {"type": "array", "items": {"type": "string"}},
+        "sections": {"type": "array", "items": {"type": "string"}},
+        "comment_lines": {"type": "integer", "minimum": 0},
+        "warnings": {"type": "array", "items": {"type": "string"}},
+        "error": {"type": "string"}
+      }
+    }
   }
 }
-

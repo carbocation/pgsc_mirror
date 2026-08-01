@@ -238,6 +238,43 @@ func (a *App) Status(ctx context.Context) (StatusReport, error) {
 			ts.ReleaseID = p.ReleaseID
 			ts.PublishedAt = &p.PublishedAt
 			ts.Entries = p.EntryCount
+			entries, _, manifestErr := a.readManifest(ctx, t.Store, p)
+			if manifestErr != nil {
+				ts.Error = "read release manifest: " + manifestErr.Error()
+			} else {
+				ts.HeaderTypes = make(map[string]int)
+				schemas := make(map[string]*HeaderSchema)
+				for i := range entries {
+					if entries[i].Status != model.StatusReady {
+						continue
+					}
+					h := entries[i].Header
+					if !h.Current() {
+						ts.UninspectedHeaders++
+						continue
+					}
+					ts.HeaderTypes[h.Type]++
+					key := h.Type + "\x00" + h.SchemaSHA256
+					schema := schemas[key]
+					if schema == nil {
+						schema = &HeaderSchema{Type: h.Type, SchemaSHA256: h.SchemaSHA256}
+						schemas[key] = schema
+					}
+					schema.Count++
+					if h.Status != "recognized" || h.Error != "" || len(h.Warnings) > 0 {
+						ts.HeaderAnomalies++
+					}
+				}
+				for _, schema := range schemas {
+					ts.HeaderSchemas = append(ts.HeaderSchemas, *schema)
+				}
+				sort.Slice(ts.HeaderSchemas, func(i, j int) bool {
+					if ts.HeaderSchemas[i].Type != ts.HeaderSchemas[j].Type {
+						return ts.HeaderSchemas[i].Type < ts.HeaderSchemas[j].Type
+					}
+					return ts.HeaderSchemas[i].SchemaSHA256 < ts.HeaderSchemas[j].SchemaSHA256
+				})
+			}
 		}
 		report.Targets = append(report.Targets, ts)
 	}
@@ -293,7 +330,7 @@ func (a *App) RebuildState(ctx context.Context, dryRun bool) (RunReport, error) 
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return RunReport{}, err
 		}
-		p := model.Pointer{ReleaseID: id, ManifestKey: obj.Key, ManifestSHA256: hex.EncodeToString(sum[:]), ScoreListSHA256: scoreSHA, MetadataSHA256: metadataSHA, PublishedAt: published, EntryCount: len(entries), GenomeBuild: a.Config.GenomeBuild}
+		p := model.Pointer{ReleaseID: id, ManifestKey: obj.Key, ManifestSHA256: hex.EncodeToString(sum[:]), ScoreListSHA256: scoreSHA, MetadataSHA256: metadataSHA, PublishedAt: published, EntryCount: len(entries), GenomeBuild: a.Config.GenomeBuild, HeaderInspectorVersion: observedHeaderInspectorVersion(entries)}
 		releases = append(releases, state.RebuildRelease{Pointer: p, Entries: entries})
 	}
 	sort.Slice(releases, func(i, j int) bool {
@@ -315,6 +352,24 @@ func (a *App) RebuildState(ctx context.Context, dryRun bool) (RunReport, error) 
 		return RunReport{}, err
 	}
 	return RunReport{Command: "rebuild-state", Changed: true, Message: fmt.Sprintf("rebuilt SQLite from %d immutable releases", len(releases))}, nil
+}
+
+func observedHeaderInspectorVersion(entries []model.Entry) int {
+	version := 0
+	found := false
+	for i := range entries {
+		if entries[i].Status != model.StatusReady {
+			continue
+		}
+		if entries[i].Header == nil {
+			return 0
+		}
+		if !found || entries[i].Header.InspectorVersion < version {
+			version = entries[i].Header.InspectorVersion
+			found = true
+		}
+	}
+	return version
 }
 
 func objectSHA256(ctx context.Context, st store.Store, key string) (string, error) {

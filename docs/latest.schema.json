@@ -16,7 +16,7 @@
     "metadata_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "published_at": {"type": "string", "format": "date-time"},
     "entry_count": {"type": "integer", "minimum": 0},
-    "genome_build": {"const": "GRCh38"}
+    "genome_build": {"const": "GRCh38"},
+    "header_inspector_version": {"type": "integer", "minimum": 1}
   }
 }
-

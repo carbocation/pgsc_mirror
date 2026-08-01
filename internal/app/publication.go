@@ -16,6 +16,7 @@ import (
 	"github.com/pgsc-mirror/pgsc-mirror/internal/manifest"
 	"github.com/pgsc-mirror/pgsc-mirror/internal/model"
 	"github.com/pgsc-mirror/pgsc-mirror/internal/store"
+	"github.com/pgsc-mirror/pgsc-mirror/pkg/scoreheader"
 )
 
 func (a *App) ensureBlobs(ctx context.Context, entries []model.Entry) error {
@@ -106,10 +107,20 @@ func (a *App) ensureBlob(ctx context.Context, e *model.Entry) error {
 		missing = append(missing, t)
 	}
 	if len(missing) == 0 {
+		if !e.Header.Current() {
+			if err := inspectStoredHeader(ctx, source.Store, e); err != nil {
+				return err
+			}
+		}
 		_ = removePartial(a.partialPath(e))
 		return nil
 	}
 	if source.Store != nil {
+		if !e.Header.Current() {
+			if err := inspectStoredHeader(ctx, source.Store, e); err != nil {
+				return err
+			}
+		}
 		for _, dst := range missing {
 			r, _, err := source.Open(ctx, e.BlobKey)
 			if err != nil {
@@ -154,6 +165,11 @@ func (a *App) ensureBlob(ctx context.Context, e *model.Entry) error {
 	}
 	e.UpstreamETag = result.ETag
 	e.UpstreamLastModified = result.LastModified
+	if !e.Header.Current() {
+		if err := inspectHeaderFile(result.Path, e); err != nil {
+			return err
+		}
+	}
 	for _, dst := range missing {
 		opts := store.PutOptions{DoesNotExist: true, ContentType: "application/gzip", Metadata: map[string]string{"source-md5": e.SourceMD5, "pgs-id": e.PGSID}}
 		info, err := putFile(ctx, dst.Store, e.BlobKey, result.Path, opts)
@@ -171,6 +187,32 @@ func (a *App) ensureBlob(ctx context.Context, e *model.Entry) error {
 	if a.State != nil {
 		_ = a.State.RecordTransfer(ctx, e.PGSID, e.SourceMD5, "", result.Size, result.Attempts, "stored", nil)
 	}
+	return nil
+}
+
+func inspectStoredHeader(ctx context.Context, st store.Store, e *model.Entry) error {
+	r, _, err := st.Open(ctx, e.BlobKey)
+	if err != nil {
+		return fmt.Errorf("open stored blob for header inspection: %w", err)
+	}
+	inspection := scoreheader.InspectGzip(r)
+	if err := r.Close(); err != nil {
+		return fmt.Errorf("close stored blob after header inspection: %w", err)
+	}
+	e.Header = &inspection
+	return nil
+}
+
+func inspectHeaderFile(path string, e *model.Entry) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open verified download for header inspection: %w", err)
+	}
+	inspection := scoreheader.InspectGzip(f)
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close verified download after header inspection: %w", err)
+	}
+	e.Header = &inspection
 	return nil
 }
 

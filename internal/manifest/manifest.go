@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/pgsc-mirror/pgsc-mirror/internal/model"
+	"github.com/pgsc-mirror/pgsc-mirror/pkg/scoreheader"
 )
 
 func sorted(entries []model.Entry) []model.Entry {
@@ -27,10 +28,11 @@ func ReleaseID(now time.Time, entries []model.Entry, snapshots ...[]byte) (strin
 	type seed struct {
 		PGSID, GenomeBuild, SourceURL, SourceMD5, BlobKey, Status, License string
 		SizeBytes                                                          int64
+		Header                                                             *scoreheader.Inspection
 	}
 	ss := make([]seed, 0, len(entries))
 	for _, e := range sorted(entries) {
-		ss = append(ss, seed{e.PGSID, e.GenomeBuild, e.SourceURL, e.SourceMD5, e.BlobKey, e.Status, e.License, e.SizeBytes})
+		ss = append(ss, seed{e.PGSID, e.GenomeBuild, e.SourceURL, e.SourceMD5, e.BlobKey, e.Status, e.License, e.SizeBytes, e.Header})
 	}
 	b, err := json.Marshal(ss)
 	if err != nil {
