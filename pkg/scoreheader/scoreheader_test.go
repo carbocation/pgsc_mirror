@@ -57,6 +57,50 @@ func TestFingerprintDistinguishesColumnVariants(t *testing.T) {
 	}
 }
 
+func TestInspectHarmonizedDosageWeightsV2(t *testing.T) {
+	body := `###PGS CATALOG SCORING FILE - see https://www.pgscatalog.org/downloads/#dl_ftp_scoring for additional information
+#format_version=2.0
+##POLYGENIC SCORE (PGS) INFORMATION
+#pgs_id=PGS004255
+#pgs_name=example
+#trait_reported=example
+#trait_mapped=example
+#trait_efo=EFO_0000000
+#genome_build=GRCh38
+#variants_number=1
+#weight_type=non-additive
+##SOURCE INFORMATION
+#pgp_id=PGP000000
+#citation=example
+##HARMONIZATION DETAILS
+#HmPOS_build=GRCh38
+#HmPOS_date=2026-08-01
+#HmPOS_match_chr=True
+#HmPOS_match_pos=True
+chr_name	chr_position	effect_allele	other_allele	dosage_0_weight	dosage_1_weight	dosage_2_weight	hm_source	hm_rsID	hm_chr	hm_pos	hm_inferOtherAllele
+1	42	A	G	0	0.5	1	ENSEMBL	rs1	1	42	False
+`
+	got := InspectGzip(bytes.NewReader(gzipped(t, body)))
+	if got.Status != StatusRecognized || got.Type != TypeHarmonizedV2 || len(got.Warnings) != 0 {
+		t.Fatalf("valid dosage-weight header was not recognized: %+v", got)
+	}
+	if got.SchemaSHA256 != "7dcf9f6fea7c61f54a71072327ab7a9b4f8efbb56da51507788fb6623332a59c" {
+		t.Fatalf("live dosage schema fingerprint changed: %s", got.SchemaSHA256)
+	}
+}
+
+func TestRejectsIncompleteDosageWeightSet(t *testing.T) {
+	body := "#format_version=2.0\neffect_allele\tdosage_0_weight\tdosage_1_weight\thm_chr\thm_pos\n"
+	got := InspectGzip(bytes.NewReader(gzipped(t, body)))
+	if got.Status != StatusUnrecognized || got.Type != TypeUnknown {
+		t.Fatalf("incomplete dosage-weight header was recognized: %+v", got)
+	}
+	warnings := strings.Join(got.Warnings, "\n")
+	if !strings.Contains(warnings, "dosage-specific weights require dosage_0_weight, dosage_1_weight, and dosage_2_weight") {
+		t.Fatalf("incomplete dosage warning missing: %+v", got.Warnings)
+	}
+}
+
 func TestClassifiesUnversionedAndFormattedHeaders(t *testing.T) {
 	harmonized := InspectGzip(bytes.NewReader(gzipped(t, "effect_allele\teffect_weight\thm_source\thm_chr\thm_pos\n")))
 	if harmonized.Type != TypeHarmonizedUnversioned {

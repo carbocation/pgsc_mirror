@@ -17,7 +17,7 @@ const (
 	// InspectorVersion changes when classification or fingerprint semantics
 	// change. Mirrors can use it to decide whether stored observations need to
 	// be refreshed from their immutable blobs.
-	InspectorVersion = 1
+	InspectorVersion = 2
 
 	StatusRecognized   = "recognized"
 	StatusUnrecognized = "unrecognized"
@@ -158,10 +158,25 @@ func classify(formatVersion, delimiter string, columns []string) (string, []stri
 	if delimiter != "tab" {
 		warnings = append(warnings, "column header is not tab-delimited")
 	}
-	core := seen["effect_allele"] && seen["effect_weight"]
+	effectAllele := seen["effect_allele"]
+	effectWeight := seen["effect_weight"]
+	dosageWeightCount := 0
+	for _, column := range []string{"dosage_0_weight", "dosage_1_weight", "dosage_2_weight"} {
+		if seen[column] {
+			dosageWeightCount++
+		}
+	}
+	dosageWeights := dosageWeightCount == 3
+	core := effectAllele && (effectWeight || dosageWeights)
 	harmonized := core && seen["hm_chr"] && seen["hm_pos"]
-	if !core {
-		warnings = append(warnings, "required effect_allele/effect_weight columns were not both found")
+	if !effectAllele {
+		warnings = append(warnings, "required effect_allele column was not found")
+	}
+	if !effectWeight && !dosageWeights {
+		warnings = append(warnings, "neither effect_weight nor a complete dosage-specific weight set was found")
+	}
+	if dosageWeightCount > 0 && !dosageWeights {
+		warnings = append(warnings, "dosage-specific weights require dosage_0_weight, dosage_1_weight, and dosage_2_weight")
 	}
 	if core && !harmonized {
 		warnings = append(warnings, "harmonized hm_chr/hm_pos columns were not both found")

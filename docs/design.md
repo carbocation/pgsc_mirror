@@ -52,6 +52,8 @@ With the example defaults, scoring-file scratch is bounded to roughly two 10-GiB
 
 Every new or revised verified scoring file is inspected through its gzip stream before publication. Its manifest entry records the observed format version, delimiter, exact ordered columns, metadata-field names, section headings, a stable schema fingerprint, and a human-readable header type.
 
+The classifier accepts both the usual single `effect_weight` representation and the complete `dosage_0_weight`/`dosage_1_weight`/`dosage_2_weight` representation documented for non-additive PGS Catalog scores. These share the same broad formatted or harmonized header type; their exact ordered schemas remain distinguishable by `schema_sha256`.
+
 Inspection stops at the table header and is bounded to 2 MiB or 10,000 decompressed header lines. A checksum-valid upstream anomaly is preserved byte-for-byte and marked `unrecognized` or `unreadable`; it is not silently normalized or dropped.
 
 Unchanged blobs reuse their versioned observation. `LATEST.json` records the completed inspector version so the service can detect older observations.
