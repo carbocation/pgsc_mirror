@@ -20,7 +20,9 @@ request_timeout = "2m"
 max_attempts = 5
 initial_backoff = "1s"
 max_backoff = "30s"
-lease_duration = "2h"
+# The lease is renewed while a run is active. After a hard shutdown another
+# operator can take over once this interval expires.
+lease_duration = "15m"
 # Development safeguard only. Zero means all sidecars. A nonzero limit is
 # permitted for plan, but reconcile/update refuse to publish a partial release.
 sidecar_limit = 0
@@ -40,6 +42,11 @@ billing_project = ""
 [state]
 # Defaults to <local.root>/.pgsc-mirror/state.db when omitted.
 path = "./mirror/.pgsc-mirror/state.db"
+# Defaults beside state.path. Holds resumable downloads and provider staging.
+work_dir = "./mirror/.pgsc-mirror/work"
+# An interrupted inventory can resume without refetching successful sidecars.
+# Older checkpoints are discarded so periodic reconcile still detects revisions.
+checkpoint_max_age = "24h"
 
 [retention]
 missing_grace = "720h" # 30 days
@@ -49,4 +56,3 @@ keep_releases = 10
 default_sample = 100
 # Advisory only: scheduling remains external to the one-shot binary.
 schedule = "weekly"
-

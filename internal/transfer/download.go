@@ -36,6 +36,7 @@ type partialMeta struct {
 	ETag         string `json:"etag,omitempty"`
 	LastModified string `json:"last_modified,omitempty"`
 	TotalSize    int64  `json:"total_size,omitempty"`
+	VerifiedMD5  string `json:"verified_md5,omitempty"`
 }
 
 func (c *HTTPClient) Download(ctx context.Context, urls []string, partPath, expectedMD5 string) (DownloadResult, error) {
@@ -58,6 +59,25 @@ func (c *HTTPClient) DownloadBounded(ctx context.Context, urls []string, partPat
 	meta, _ := readPartialMeta(metaPath)
 	if _, err := os.Stat(partPath); errors.Is(err, os.ErrNotExist) {
 		meta = partialMeta{}
+	}
+	if size := fileSize(partPath); size > 0 {
+		gotMD5, err := fileMD5(partPath)
+		if err != nil {
+			return DownloadResult{}, err
+		}
+		if strings.EqualFold(gotMD5, expectedMD5) {
+			meta.TotalSize = size
+			meta.VerifiedMD5 = gotMD5
+			if err := writePartialMeta(metaPath, meta); err != nil {
+				return DownloadResult{}, err
+			}
+			return DownloadResult{Path: partPath, SourceURL: meta.SourceURL, MD5: gotMD5, Size: size, ETag: meta.ETag, LastModified: meta.LastModified}, nil
+		}
+		if meta.TotalSize > 0 && size >= meta.TotalSize {
+			_ = os.Remove(partPath)
+			_ = os.Remove(metaPath)
+			meta = partialMeta{}
+		}
 	}
 	var last error
 	for attempt := 0; attempt < c.policy.Attempts; attempt++ {
@@ -172,6 +192,7 @@ func (c *HTTPClient) DownloadBounded(ctx context.Context, urls []string, partPat
 		} else {
 			copied, copyErr = io.Copy(f, resp.Body)
 		}
+		syncErr := f.Sync()
 		closeErr := f.Close()
 		resp.Body.Close()
 		if errors.Is(copyErr, ErrSizeLimit) {
@@ -179,8 +200,8 @@ func (c *HTTPClient) DownloadBounded(ctx context.Context, urls []string, partPat
 			_ = os.Remove(metaPath)
 			return DownloadResult{}, copyErr
 		}
-		if copyErr != nil || closeErr != nil {
-			last = errors.Join(copyErr, closeErr)
+		if copyErr != nil || syncErr != nil || closeErr != nil {
+			last = errors.Join(copyErr, syncErr, closeErr)
 			if err := c.waitRetry(ctx, attempt, 0); err != nil {
 				return DownloadResult{}, err
 			}
@@ -208,7 +229,11 @@ func (c *HTTPClient) DownloadBounded(ctx context.Context, urls []string, partPat
 			_ = os.Remove(metaPath)
 			return DownloadResult{}, fmt.Errorf("%w: got %s, want %s", ErrChecksumMismatch, gotMD5, expectedMD5)
 		}
-		_ = os.Remove(metaPath)
+		meta.TotalSize = gotSize
+		meta.VerifiedMD5 = gotMD5
+		if err := writePartialMeta(metaPath, meta); err != nil {
+			return DownloadResult{}, err
+		}
 		return DownloadResult{Path: partPath, SourceURL: meta.SourceURL, MD5: gotMD5, Size: gotSize, ETag: meta.ETag, LastModified: meta.LastModified, Attempts: attempt + 1}, nil
 	}
 	return DownloadResult{}, fmt.Errorf("download failed after %d attempts: %w", c.policy.Attempts, last)
@@ -261,10 +286,37 @@ func writePartialMeta(name string, m partialMeta) error {
 		return err
 	}
 	tmp := name + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, name)
+	remove := true
+	defer func() {
+		if remove {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, name); err != nil {
+		return err
+	}
+	remove = false
+	dir, err := os.Open(filepath.Dir(name))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func changedValidator(m partialMeta, resp *http.Response) bool {

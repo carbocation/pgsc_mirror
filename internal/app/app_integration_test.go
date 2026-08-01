@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,6 +32,50 @@ type syntheticUpstream struct {
 	licenses map[string]string
 	note     string
 	version  int
+}
+
+type sidecarGate struct {
+	handler http.Handler
+	mu      sync.Mutex
+	blocked map[string]bool
+	calls   map[string]int
+}
+
+func newSidecarGate(handler http.Handler) *sidecarGate {
+	return &sidecarGate{handler: handler, blocked: make(map[string]bool), calls: make(map[string]int)}
+}
+
+func (g *sidecarGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if strings.HasSuffix(r.URL.Path, ".md5") {
+		var id string
+		for _, part := range strings.Split(r.URL.Path, "/") {
+			if strings.HasPrefix(part, "PGS") && len(part) == 9 {
+				id = part
+				break
+			}
+		}
+		g.mu.Lock()
+		g.calls[id]++
+		blocked := g.blocked[id]
+		g.mu.Unlock()
+		if blocked {
+			http.NotFound(w, r)
+			return
+		}
+	}
+	g.handler.ServeHTTP(w, r)
+}
+
+func (g *sidecarGate) block(id string, blocked bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.blocked[id] = blocked
+}
+
+func (g *sidecarGate) count(id string) int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.calls[id]
 }
 
 func newSyntheticUpstream() *syntheticUpstream {
@@ -360,6 +405,216 @@ func TestReconcileLifecycleAndRecovery(t *testing.T) {
 	}
 	if status.State.Available != 2 || status.State.LatestRelease == "" {
 		t.Fatalf("bad rebuilt status %+v", status)
+	}
+}
+
+func TestReconcileResumesSidecarCheckpoint(t *testing.T) {
+	up := newSyntheticUpstream()
+	up.set("PGS000001", "first", "one", true)
+	up.set("PGS000002", "second", "two", true)
+	gate := newSidecarGate(up)
+	gate.block("PGS000002", true)
+	srv := httptest.NewServer(gate)
+	defer srv.Close()
+	cfg := integrationConfig(t.TempDir(), srv.URL)
+	cfg.Transfer.Concurrency = 1
+	cfg.Transfer.MaxAttempts = 1
+	a, err := New(context.Background(), cfg, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if _, err := a.Reconcile(context.Background(), false); err == nil {
+		t.Fatal("blocked sidecar unexpectedly reconciled")
+	}
+	gate.block("PGS000002", false)
+	if _, err := a.Reconcile(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if got := gate.count("PGS000001"); got != 1 {
+		t.Fatalf("successful sidecar was refetched after interruption: %d calls", got)
+	}
+	if got := gate.count("PGS000002"); got != 2 {
+		t.Fatalf("failed sidecar call count is %d, want 2", got)
+	}
+	if _, err := a.Reconcile(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if gate.count("PGS000001") != 2 || gate.count("PGS000002") != 3 {
+		t.Fatalf("completed checkpoint was reused by a later audit: one=%d two=%d", gate.count("PGS000001"), gate.count("PGS000002"))
+	}
+}
+
+func TestReconcileAutomaticallyCatchesUpLostState(t *testing.T) {
+	up := newSyntheticUpstream()
+	up.set("PGS000001", "first", "one", true)
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	root := t.TempDir()
+	cfg := integrationConfig(root, srv.URL)
+	a, err := New(context.Background(), cfg, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := a.Reconcile(context.Background(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		_ = os.Remove(cfg.State.Path + suffix)
+	}
+	a, err = New(context.Background(), cfg, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	second, err := a.Reconcile(context.Background(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Changed || second.ReleaseID != first.ReleaseID {
+		t.Fatalf("state catch-up republished the release: first=%+v second=%+v", first, second)
+	}
+	summary, err := a.State.Summary(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.LatestRelease != first.ReleaseID || summary.Available != 1 {
+		t.Fatalf("state did not catch up from canonical release: %+v", summary)
+	}
+}
+
+func TestLeaseRenewsAndReleases(t *testing.T) {
+	ls, err := localstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults().WithRuntimeDefaults()
+	cfg.Transfer.LeaseDuration = config.Duration{Duration: 300 * time.Millisecond}
+	a := &App{Config: cfg, targets: []target{{kind: "local", Store: ls}}, now: time.Now}
+	lease, err := a.acquireLease(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstGeneration := lease.generation
+	_ = a.startLeaseRenewal(context.Background(), lease)
+	deadline := time.After(time.Second)
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	renewed := false
+	for !renewed {
+		select {
+		case <-deadline:
+			t.Fatal("lease did not renew")
+		case <-ticker.C:
+			lease.mu.Lock()
+			renewed = lease.generation != firstGeneration
+			lease.mu.Unlock()
+		}
+	}
+	if err := lease.stopRenewal(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.releaseLease(context.Background(), lease); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ls.Stat(context.Background(), model.LeaseKey); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("lease remains after release: %v", err)
+	}
+}
+
+func TestReconcileReusesVerifiedDownloadAfterUploadFailure(t *testing.T) {
+	up := newSyntheticUpstream()
+	up.set("PGS000001", "durable score", "one", true)
+	var scoreGets atomic.Int32
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, ".txt.gz") {
+			scoreGets.Add(1)
+		}
+		up.ServeHTTP(w, r)
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+	cfg := integrationConfig(t.TempDir(), srv.URL)
+	a, err := New(context.Background(), cfg, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	original := a.targets[0].Store
+	a.targets[0].Store = &failingStore{Store: original, failSuffix: ".txt.gz"}
+	if _, err := a.Reconcile(context.Background(), false); err == nil {
+		t.Fatal("injected blob upload failure succeeded")
+	}
+	partials, err := filepath.Glob(filepath.Join(a.Config.State.WorkDir, "partials", "*.part"))
+	if err != nil || len(partials) != 1 {
+		t.Fatalf("verified partial was not retained: files=%v err=%v", partials, err)
+	}
+	a.targets[0].Store = original
+	if _, err := a.Reconcile(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if got := scoreGets.Load(); got != 1 {
+		t.Fatalf("score body was fetched %d times, want 1", got)
+	}
+	if _, err := os.Stat(partials[0]); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stored partial was not removed: %v", err)
+	}
+}
+
+func TestReconcileRepairsLaggingSecondaryPointer(t *testing.T) {
+	up := newSyntheticUpstream()
+	up.set("PGS000001", "first", "one", true)
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	cfg := integrationConfig(t.TempDir(), srv.URL)
+	a, err := New(context.Background(), cfg, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	primary := a.targets[0].Store
+	secondary, err := localstore.New(filepath.Join(t.TempDir(), "secondary"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.targets = []target{{kind: "gcs", Store: primary}, {kind: "local", Store: secondary}}
+	if _, err := a.Reconcile(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	up.set("PGS000001", "second", "one", true)
+	a.targets[1].Store = &failingStore{Store: secondary, failSuffix: model.LatestKey}
+	if _, err := a.Reconcile(context.Background(), false); err == nil {
+		t.Fatal("injected secondary pointer failure succeeded")
+	}
+	primaryPointer, _, err := a.readPointer(context.Background(), primary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondaryPointer, _, err := a.readPointer(context.Background(), secondary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if primaryPointer.ReleaseID == secondaryPointer.ReleaseID {
+		t.Fatal("secondary pointer unexpectedly advanced during injected failure")
+	}
+	a.targets[1].Store = secondary
+	repaired, err := a.Reconcile(context.Background(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !repaired.Changed || !strings.Contains(repaired.Message, "repaired lagging targets") {
+		t.Fatalf("repair was not reported: %+v", repaired)
+	}
+	secondaryPointer, _, err = a.readPointer(context.Background(), secondary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondaryPointer.ReleaseID != primaryPointer.ReleaseID {
+		t.Fatalf("secondary remains stale: primary=%s secondary=%s", primaryPointer.ReleaseID, secondaryPointer.ReleaseID)
 	}
 }
 

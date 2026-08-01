@@ -91,23 +91,6 @@ func (s *Store) Put(ctx context.Context, key string, r io.Reader, opts store.Put
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return store.ObjectInfo{}, err
 	}
-	var unlock func()
-	var matchedGeneration int64
-	if opts.GenerationMatch != nil {
-		unlock, err = acquireObjectLock(ctx, p+".pgsc-lock")
-		if err != nil {
-			return store.ObjectInfo{}, err
-		}
-		defer unlock()
-		cur, err := os.Stat(p)
-		if errors.Is(err, os.ErrNotExist) || (err == nil && cur.ModTime().UnixNano() != *opts.GenerationMatch) {
-			return store.ObjectInfo{}, store.ErrPrecondition
-		}
-		if err != nil {
-			return store.ObjectInfo{}, err
-		}
-		matchedGeneration = cur.ModTime().UnixNano()
-	}
 	tmp, err := os.CreateTemp(filepath.Dir(p), ".pgsc-put-*.part")
 	if err != nil {
 		return store.ObjectInfo{}, err
@@ -130,7 +113,22 @@ func (s *Store) Put(ctx context.Context, key string, r io.Reader, opts store.Put
 	if err := tmp.Close(); err != nil {
 		return store.ObjectInfo{}, err
 	}
+	var unlock func()
+	var matchedGeneration int64
 	if opts.GenerationMatch != nil {
+		unlock, err = acquireObjectLock(ctx, p+".pgsc-lock")
+		if err != nil {
+			return store.ObjectInfo{}, err
+		}
+		defer unlock()
+		cur, err := os.Stat(p)
+		if errors.Is(err, os.ErrNotExist) || (err == nil && cur.ModTime().UnixNano() != *opts.GenerationMatch) {
+			return store.ObjectInfo{}, store.ErrPrecondition
+		}
+		if err != nil {
+			return store.ObjectInfo{}, err
+		}
+		matchedGeneration = cur.ModTime().UnixNano()
 		// A temp file can receive the same filesystem timestamp as the object it
 		// replaces. Force the next generation forward by at least one second so
 		// compare-and-swap remains reliable even on coarse timestamp filesystems.
@@ -216,7 +214,7 @@ func acquireObjectLock(ctx context.Context, name string) (func(), error) {
 		if !errors.Is(err, os.ErrExist) {
 			return nil, err
 		}
-		if fi, statErr := os.Stat(name); statErr == nil && time.Since(fi.ModTime()) > time.Hour {
+		if fi, statErr := os.Stat(name); statErr == nil && time.Since(fi.ModTime()) > time.Minute {
 			_ = os.Remove(name)
 			continue
 		}
@@ -226,6 +224,29 @@ func acquireObjectLock(ctx context.Context, name string) (func(), error) {
 		case <-ticker.C:
 		}
 	}
+}
+
+// CleanupStaging removes atomic-write temporary files left by a hard stop.
+// Reconciliation invokes this only while holding the provider-backed lease.
+func (s *Store) CleanupStaging() (int, error) {
+	removed := 0
+	err := filepath.Walk(s.root, func(name string, fi os.FileInfo, walkErr error) error {
+		if errors.Is(walkErr, os.ErrNotExist) {
+			return nil
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		if fi.IsDir() || !strings.HasPrefix(fi.Name(), ".pgsc-put-") || !strings.HasSuffix(fi.Name(), ".part") {
+			return nil
+		}
+		if err := os.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		removed++
+		return nil
+	})
+	return removed, err
 }
 
 func (s *Store) List(_ context.Context, prefix string) ([]store.ObjectInfo, error) {

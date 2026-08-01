@@ -39,6 +39,11 @@ type RebuildRelease struct {
 	Entries []model.Entry
 }
 
+type InventorySidecar struct {
+	SourceMD5 string
+	SourceURL string
+}
+
 func Open(path string) (*DB, error) {
 	dsn := "file:" + filepath.ToSlash(path) + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)"
 	sqldb, err := sql.Open("sqlite", dsn)
@@ -91,9 +96,108 @@ CREATE TABLE IF NOT EXISTS transfers (
  pgs_id TEXT PRIMARY KEY, source_md5 TEXT NOT NULL, part_path TEXT NOT NULL DEFAULT '',
  bytes_downloaded INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,
  status TEXT NOT NULL, error TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS inventory_checkpoints (
+ id INTEGER PRIMARY KEY, fingerprint TEXT NOT NULL, started_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS inventory_checkpoints_fingerprint ON inventory_checkpoints(fingerprint);
+CREATE TABLE IF NOT EXISTS inventory_sidecars (
+ checkpoint_id INTEGER NOT NULL REFERENCES inventory_checkpoints(id) ON DELETE CASCADE,
+ pgs_id TEXT NOT NULL, source_md5 TEXT NOT NULL, source_url TEXT NOT NULL,
+ checked_at TEXT NOT NULL, PRIMARY KEY(checkpoint_id,pgs_id)
 );`
-	_, err := d.db.ExecContext(ctx, schema)
+	if _, err := d.db.ExecContext(ctx, schema); err != nil {
+		return err
+	}
+	_, err := d.db.ExecContext(ctx, `UPDATE runs SET finished_at=?,status='interrupted',error='process ended before run completion' WHERE status='running'`, time.Now().UTC().Format(time.RFC3339Nano))
 	return err
+}
+
+// BeginInventory resumes a recent checkpoint for the same immutable input
+// fingerprint, or starts a new checkpoint. Old checkpoints are discarded so a
+// later full reconciliation still refetches every checksum sidecar.
+func (d *DB) BeginInventory(ctx context.Context, fingerprint string, maxAge time.Duration, now time.Time) (int64, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	cutoff := now.Add(-maxAge).UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `DELETE FROM inventory_checkpoints WHERE fingerprint<>? OR updated_at<?`, fingerprint, cutoff); err != nil {
+		return 0, err
+	}
+	var id int64
+	err = tx.QueryRowContext(ctx, `SELECT id FROM inventory_checkpoints WHERE fingerprint=? ORDER BY id DESC LIMIT 1`, fingerprint).Scan(&id)
+	stamp := now.UTC().Format(time.RFC3339Nano)
+	if err == sql.ErrNoRows {
+		result, insertErr := tx.ExecContext(ctx, `INSERT INTO inventory_checkpoints(fingerprint,started_at,updated_at) VALUES(?,?,?)`, fingerprint, stamp, stamp)
+		if insertErr != nil {
+			return 0, insertErr
+		}
+		id, err = result.LastInsertId()
+	} else if err == nil {
+		_, err = tx.ExecContext(ctx, `UPDATE inventory_checkpoints SET updated_at=? WHERE id=?`, stamp, id)
+	}
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+func (d *DB) InventorySidecar(ctx context.Context, checkpointID int64, pgsID string) (InventorySidecar, bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var result InventorySidecar
+	err := d.db.QueryRowContext(ctx, `SELECT source_md5,source_url FROM inventory_sidecars WHERE checkpoint_id=? AND pgs_id=?`, checkpointID, pgsID).Scan(&result.SourceMD5, &result.SourceURL)
+	if err == sql.ErrNoRows {
+		return InventorySidecar{}, false, nil
+	}
+	return result, err == nil, err
+}
+
+func (d *DB) PutInventorySidecar(ctx context.Context, checkpointID int64, pgsID, sourceMD5, sourceURL string, now time.Time) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stamp := now.UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO inventory_sidecars(checkpoint_id,pgs_id,source_md5,source_url,checked_at) VALUES(?,?,?,?,?) ON CONFLICT(checkpoint_id,pgs_id) DO UPDATE SET source_md5=excluded.source_md5,source_url=excluded.source_url,checked_at=excluded.checked_at`, checkpointID, pgsID, sourceMD5, sourceURL, stamp); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE inventory_checkpoints SET updated_at=? WHERE id=?`, stamp, checkpointID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *DB) ConsumeInventory(ctx context.Context, checkpointID int64) error {
+	if checkpointID == 0 {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, err := d.db.ExecContext(ctx, `DELETE FROM inventory_checkpoints WHERE id=?`, checkpointID)
+	return err
+}
+
+func (d *DB) LatestRelease(ctx context.Context) (string, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var releaseID string
+	err := d.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key='latest_release'`).Scan(&releaseID)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return releaseID, err
 }
 
 func (d *DB) RecordTransfer(ctx context.Context, pgsID, sourceMD5, partPath string, bytesDownloaded int64, attempts int, status string, transferErr error) error {
@@ -195,7 +299,7 @@ func (d *DB) Summary(ctx context.Context) (Summary, error) {
 	if err := d.db.QueryRowContext(ctx, `SELECT count(*),coalesce(sum(status='available'),0),coalesce(sum(status='withdrawn'),0) FROM scores`).Scan(&s.Entries, &s.Available, &s.Withdrawn); err != nil {
 		return s, err
 	}
-	if err := d.db.QueryRowContext(ctx, `SELECT count(*) FROM runs WHERE status='failed'`).Scan(&s.FailedRuns); err != nil {
+	if err := d.db.QueryRowContext(ctx, `SELECT count(*) FROM runs WHERE status IN ('failed','interrupted')`).Scan(&s.FailedRuns); err != nil {
 		return s, err
 	}
 	var finished sql.NullString

@@ -86,7 +86,9 @@ type Identity struct {
 }
 
 type State struct {
-	Path string `toml:"path"`
+	Path             string   `toml:"path"`
+	WorkDir          string   `toml:"work_dir"`
+	CheckpointMaxAge Duration `toml:"checkpoint_max_age"`
 }
 
 func Defaults() Config {
@@ -103,13 +105,14 @@ func Defaults() Config {
 			MaxAttempts:    5,
 			InitialBackoff: Duration{time.Second},
 			MaxBackoff:     Duration{30 * time.Second},
-			LeaseDuration:  Duration{2 * time.Hour},
+			LeaseDuration:  Duration{15 * time.Minute},
 		},
 		Targets:   Targets{Local: true},
 		Local:     Local{Root: "./mirror"},
 		Retention: Retention{MissingGrace: Duration{30 * 24 * time.Hour}, KeepReleases: 10},
 		Verify:    Verify{DefaultSample: 100},
 		Identity:  Identity{UserAgent: "pgsc-mirror/dev"},
+		State:     State{CheckpointMaxAge: Duration{24 * time.Hour}},
 	}
 }
 
@@ -134,10 +137,26 @@ func Load(path string) (Config, error) {
 	} else if c.State.Path != "" && !filepath.IsAbs(c.State.Path) {
 		c.State.Path = filepath.Clean(filepath.Join(base, c.State.Path))
 	}
+	if c.State.WorkDir != "" && !filepath.IsAbs(c.State.WorkDir) {
+		c.State.WorkDir = filepath.Clean(filepath.Join(base, c.State.WorkDir))
+	}
+	c = c.WithRuntimeDefaults()
 	if c.Identity.Contact != "" && !strings.Contains(c.Identity.UserAgent, c.Identity.Contact) {
 		c.Identity.UserAgent += " (" + c.Identity.Contact + ")"
 	}
 	return c, c.Validate()
+}
+
+// WithRuntimeDefaults derives operational paths without embedding any
+// deployment-specific location in the application.
+func (c Config) WithRuntimeDefaults() Config {
+	if c.State.WorkDir == "" && c.State.Path != "" {
+		c.State.WorkDir = filepath.Join(filepath.Dir(c.State.Path), "work")
+	}
+	if c.State.CheckpointMaxAge.Duration == 0 {
+		c.State.CheckpointMaxAge = Duration{24 * time.Hour}
+	}
+	return c
 }
 
 func (c Config) Validate() error {
@@ -179,6 +198,12 @@ func (c Config) Validate() error {
 	if c.State.Path == "" {
 		return errors.New("state.path is required")
 	}
+	if c.State.WorkDir == "" {
+		return errors.New("state.work_dir is required")
+	}
+	if c.State.CheckpointMaxAge.Duration <= 0 {
+		return errors.New("state.checkpoint_max_age must be positive")
+	}
 	if strings.TrimSpace(c.Identity.UserAgent) == "" {
 		return errors.New("identity.user_agent is required")
 	}
@@ -196,6 +221,9 @@ func (c Config) Prepare() error {
 	}
 	if err := os.MkdirAll(filepath.Dir(c.State.Path), 0o755); err != nil {
 		return fmt.Errorf("create state directory: %w", err)
+	}
+	if err := os.MkdirAll(c.State.WorkDir, 0o755); err != nil {
+		return fmt.Errorf("create work directory: %w", err)
 	}
 	return nil
 }

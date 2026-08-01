@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 
 	"cloud.google.com/go/storage"
@@ -19,13 +20,14 @@ import (
 )
 
 type Store struct {
-	client *storage.Client
-	bucket *storage.BucketHandle
-	name   string
-	prefix string
+	client     *storage.Client
+	bucket     *storage.BucketHandle
+	name       string
+	prefix     string
+	stagingDir string
 }
 
-func New(ctx context.Context, bucket, prefix, billingProject string) (*Store, error) {
+func New(ctx context.Context, bucket, prefix, billingProject string, stagingDirs ...string) (*Store, error) {
 	client, err := storage.NewClient(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("create GCS client: %w", err)
@@ -34,7 +36,11 @@ func New(ctx context.Context, bucket, prefix, billingProject string) (*Store, er
 	if billingProject != "" {
 		b = b.UserProject(billingProject)
 	}
-	return &Store{client: client, bucket: b, name: "gcs://" + bucket + "/" + strings.Trim(prefix, "/"), prefix: strings.Trim(prefix, "/")}, nil
+	stagingDir := ""
+	if len(stagingDirs) > 0 {
+		stagingDir = stagingDirs[0]
+	}
+	return &Store{client: client, bucket: b, name: "gcs://" + bucket + "/" + strings.Trim(prefix, "/"), prefix: strings.Trim(prefix, "/"), stagingDir: stagingDir}, nil
 }
 
 func (s *Store) Name() string { return strings.TrimSuffix(s.name, "/") }
@@ -110,6 +116,56 @@ func (s *Store) Open(ctx context.Context, key string) (io.ReadCloser, store.Obje
 }
 
 func (s *Store) Put(ctx context.Context, key string, r io.Reader, opts store.PutOptions) (store.ObjectInfo, error) {
+	// GCS can validate the upload only if CRC32C is known before streaming. Spool
+	// non-file readers once to configured scratch so data is never buffered in memory.
+	if s.stagingDir != "" {
+		if err := os.MkdirAll(s.stagingDir, 0o755); err != nil {
+			return store.ObjectInfo{}, err
+		}
+	}
+	tmp, err := os.CreateTemp(s.stagingDir, "pgsc-gcs-put-*.part")
+	if err != nil {
+		return store.ObjectInfo{}, err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	crc := crc32.New(crc32.MakeTable(crc32.Castagnoli))
+	md := md5.New()
+	if _, err := io.Copy(io.MultiWriter(tmp, crc, md), r); err != nil {
+		tmp.Close()
+		return store.ObjectInfo{}, err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return store.ObjectInfo{}, err
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		tmp.Close()
+		return store.ObjectInfo{}, err
+	}
+	got, err := s.putPrepared(ctx, key, tmp, crc.Sum32(), md.Sum(nil), opts)
+	tmp.Close()
+	return got, err
+}
+
+func (s *Store) PutFile(ctx context.Context, key, filename string, opts store.PutOptions) (store.ObjectInfo, error) {
+	f, err := os.Open(filename)
+	if err != nil {
+		return store.ObjectInfo{}, err
+	}
+	defer f.Close()
+	crc := crc32.New(crc32.MakeTable(crc32.Castagnoli))
+	md := md5.New()
+	if _, err := io.Copy(io.MultiWriter(crc, md), f); err != nil {
+		return store.ObjectInfo{}, err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return store.ObjectInfo{}, err
+	}
+	return s.putPrepared(ctx, key, f, crc.Sum32(), md.Sum(nil), opts)
+}
+
+func (s *Store) putPrepared(ctx context.Context, key string, r io.Reader, crc uint32, md []byte, opts store.PutOptions) (store.ObjectInfo, error) {
 	obj, _, err := s.object(key)
 	if err != nil {
 		return store.ObjectInfo{}, err
@@ -124,44 +180,47 @@ func (s *Store) Put(ctx context.Context, key string, r io.Reader, opts store.Put
 	if opts.DoesNotExist || opts.GenerationMatch != nil {
 		obj = obj.If(cond)
 	}
-
-	// GCS can validate the upload only if CRC32C is known before streaming. Spool
-	// once to disk so large blobs are never buffered in memory.
-	tmp, err := os.CreateTemp("", "pgsc-gcs-put-*.part")
-	if err != nil {
-		return store.ObjectInfo{}, err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	crc := crc32.New(crc32.MakeTable(crc32.Castagnoli))
-	md := md5.New()
-	if _, err := io.Copy(io.MultiWriter(tmp, crc, md), r); err != nil {
-		tmp.Close()
-		return store.ObjectInfo{}, err
-	}
-	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		tmp.Close()
-		return store.ObjectInfo{}, err
-	}
 	w := obj.NewWriter(ctx)
 	w.ContentType = opts.ContentType
 	w.ContentEncoding = opts.ContentEncoding
 	w.Metadata = opts.Metadata
-	w.CRC32C = crc.Sum32()
+	w.CRC32C = crc
 	w.SendCRC32C = true
-	if _, err := io.Copy(w, tmp); err != nil {
+	if _, err := io.Copy(w, r); err != nil {
 		_ = w.CloseWithError(err)
-		tmp.Close()
 		return store.ObjectInfo{}, mapError(err)
 	}
-	tmp.Close()
 	if err := w.Close(); err != nil {
 		return store.ObjectInfo{}, mapError(err)
 	}
 	a := w.Attrs()
 	got := objectInfo(key, a)
-	got.MD5 = md.Sum(nil)
+	got.MD5 = append([]byte(nil), md...)
 	return got, nil
+}
+
+func (s *Store) CleanupStaging() (int, error) {
+	if s.stagingDir == "" {
+		return 0, nil
+	}
+	entries, err := os.ReadDir(s.stagingDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "pgsc-gcs-put-") || !strings.HasSuffix(entry.Name(), ".part") {
+			continue
+		}
+		if err := os.Remove(filepath.Join(s.stagingDir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return removed, err
+		}
+		removed++
+	}
+	return removed, nil
 }
 
 func (s *Store) Delete(ctx context.Context, key string, opts store.DeleteOptions) error {

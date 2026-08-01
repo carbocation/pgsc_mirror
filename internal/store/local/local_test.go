@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -84,5 +86,36 @@ func TestCompetingGenerationUpdates(t *testing.T) {
 	}
 	if success != 1 || precondition != 1 {
 		t.Fatalf("success=%d precondition=%d", success, precondition)
+	}
+}
+
+func TestCleanupStagingRemovesOnlyAtomicWritePartials(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(s.root, "blobs", "md5")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(dir, ".pgsc-put-123.part")
+	keep := filepath.Join(dir, "content.part")
+	for _, name := range []string{stale, keep} {
+		if err := os.WriteFile(name, []byte("test"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removed, err := s.CleanupStaging()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed=%d, want 1", removed)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale file remains: %v", err)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("unrelated file was removed: %v", err)
 	}
 }

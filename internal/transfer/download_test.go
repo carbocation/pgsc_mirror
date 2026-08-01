@@ -123,6 +123,32 @@ func TestDownloadChecksumMismatch(t *testing.T) {
 	}
 }
 
+func TestDownloadReusesDurableVerifiedFile(t *testing.T) {
+	body := []byte("verified data awaiting upload")
+	var gets atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gets.Add(1)
+		w.Header().Set("ETag", `"durable"`)
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+	part := filepath.Join(t.TempDir(), "verified.part")
+	first, err := testClient().Download(context.Background(), []string{srv.URL}, part, checksum(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(part + ".json"); err != nil {
+		t.Fatalf("verified metadata was not retained: %v", err)
+	}
+	second, err := testClient().Download(context.Background(), []string{srv.URL}, part, checksum(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gets.Load() != 1 || second.Attempts != 0 || second.MD5 != first.MD5 {
+		t.Fatalf("verified file was downloaded again: gets=%d first=%+v second=%+v", gets.Load(), first, second)
+	}
+}
+
 func TestDownloadBoundedRejectsAdvertisedSize(t *testing.T) {
 	body := []byte("too large")
 	var bodyWrites atomic.Int32
