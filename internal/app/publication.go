@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -23,7 +24,7 @@ func (a *App) ensureBlobs(ctx context.Context, entries []model.Entry) error {
 	jobs := make(chan int)
 	errCh := make(chan error, 1)
 	var wg sync.WaitGroup
-	workers := a.Config.Transfer.Concurrency
+	workers := a.Config.Transfer.FileConcurrency
 	if workers > len(entries) {
 		workers = len(entries)
 	}
@@ -50,7 +51,7 @@ func (a *App) ensureBlobs(ctx context.Context, entries []model.Entry) error {
 	}
 	go func() {
 		defer close(jobs)
-		for i := range entries {
+		for _, i := range a.blobJobOrder(entries) {
 			select {
 			case jobs <- i:
 			case <-ctx.Done():
@@ -65,6 +66,19 @@ func (a *App) ensureBlobs(ctx context.Context, entries []model.Entry) error {
 	default:
 		return nil
 	}
+}
+
+func (a *App) blobJobOrder(entries []model.Entry) []int {
+	withPartial := make([]int, 0, len(entries))
+	withoutPartial := make([]int, 0, len(entries))
+	for i := range entries {
+		if _, err := os.Stat(a.partialPath(&entries[i])); err == nil {
+			withPartial = append(withPartial, i)
+		} else {
+			withoutPartial = append(withoutPartial, i)
+		}
+	}
+	return append(withPartial, withoutPartial...)
 }
 
 func (a *App) ensureBlob(ctx context.Context, e *model.Entry) error {
@@ -92,6 +106,7 @@ func (a *App) ensureBlob(ctx context.Context, e *model.Entry) error {
 		missing = append(missing, t)
 	}
 	if len(missing) == 0 {
+		_ = removePartial(a.partialPath(e))
 		return nil
 	}
 	if source.Store != nil {
@@ -115,11 +130,11 @@ func (a *App) ensureBlob(ctx context.Context, e *model.Entry) error {
 				e.SizeBytes = sourceInfo.Size
 			}
 		}
+		_ = removePartial(a.partialPath(e))
 		return nil
 	}
-	partDir := filepath.Join(a.Config.State.WorkDir, "partials")
-	part := filepath.Join(partDir, e.PGSID+"-"+e.SourceMD5+".part")
-	result, err := a.HTTP.Download(ctx, a.Catalog.URLs(catalogScorePath(e)), part, e.SourceMD5)
+	part := a.partialPath(e)
+	result, err := a.HTTP.DownloadBounded(ctx, a.Catalog.URLs(catalogScorePath(e)), part, e.SourceMD5, a.Config.Transfer.MaxFileSize.Bytes)
 	if err != nil {
 		if a.State != nil {
 			if fi, statErr := os.Stat(part); statErr == nil {
@@ -152,12 +167,109 @@ func (a *App) ensureBlob(ctx context.Context, e *model.Entry) error {
 			e.GCSGeneration = info.Generation
 		}
 	}
-	_ = os.Remove(result.Path)
-	_ = os.Remove(result.Path + ".json")
+	_ = removePartial(result.Path)
 	if a.State != nil {
 		_ = a.State.RecordTransfer(ctx, e.PGSID, e.SourceMD5, "", result.Size, result.Attempts, "stored", nil)
 	}
 	return nil
+}
+
+func (a *App) partialPath(e *model.Entry) string {
+	return filepath.Join(a.Config.State.WorkDir, "partials", e.PGSID+"-"+e.SourceMD5+".part")
+}
+
+func removePartial(part string) error {
+	var errs []error
+	for _, name := range []string{part, part + ".json", part + ".json.tmp"} {
+		if err := os.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// prunePartials prevents resumable files from accumulating across repeated
+// interruptions or checksum revisions. The newest file-concurrency partials
+// for the current inventory are kept and scheduled first; everything else is
+// safe to refetch if needed.
+func (a *App) prunePartials(entries []model.Entry) (int, error) {
+	dir := filepath.Join(a.Config.State.WorkDir, "partials")
+	files, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	expected := make(map[string]struct{}, len(entries))
+	for i := range entries {
+		if entries[i].Status == model.StatusReady {
+			expected[filepath.Base(a.partialPath(&entries[i]))] = struct{}{}
+		}
+	}
+	type candidate struct {
+		name    string
+		modTime int64
+	}
+	var candidates []candidate
+	removed := 0
+	for _, file := range files {
+		name := file.Name()
+		full := filepath.Join(dir, name)
+		if file.IsDir() {
+			continue
+		}
+		if strings.HasSuffix(name, ".part.json.tmp") {
+			if err := os.Remove(full); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return removed, err
+			}
+			removed++
+			continue
+		}
+		if !strings.HasSuffix(name, ".part") {
+			continue
+		}
+		if _, ok := expected[name]; !ok {
+			if err := removePartial(full); err != nil {
+				return removed, err
+			}
+			removed++
+			continue
+		}
+		info, err := file.Info()
+		if err != nil {
+			return removed, err
+		}
+		if info.Size() > a.Config.Transfer.MaxFileSize.Bytes {
+			if err := removePartial(full); err != nil {
+				return removed, err
+			}
+			removed++
+			continue
+		}
+		candidates = append(candidates, candidate{name: full, modTime: info.ModTime().UnixNano()})
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].modTime > candidates[j].modTime })
+	keep := a.Config.Transfer.FileConcurrency
+	for i := keep; i < len(candidates); i++ {
+		if err := removePartial(candidates[i].name); err != nil {
+			return removed, err
+		}
+		removed++
+	}
+	for _, file := range files {
+		if !strings.HasSuffix(file.Name(), ".part.json") {
+			continue
+		}
+		part := strings.TrimSuffix(filepath.Join(dir, file.Name()), ".json")
+		if _, err := os.Stat(part); errors.Is(err, os.ErrNotExist) {
+			if err := os.Remove(filepath.Join(dir, file.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return removed, err
+			}
+			removed++
+		}
+	}
+	return removed, nil
 }
 
 func putFile(ctx context.Context, st store.Store, key, filename string, opts store.PutOptions) (store.ObjectInfo, error) {

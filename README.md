@@ -20,6 +20,8 @@ Blobs, metadata snapshots, and manifests are immutable. `LATEST.json` is the onl
 
 SQLite is only a disposable operational index. It uses foreign keys, WAL, a busy timeout, and serialized writes; it is never intended for GCS FUSE. Successful checksum sidecars are checkpointed there during an interrupted inventory, while verified scoring-file partials remain in the configured work directory until every target has stored them. Both are reused after restart. `rebuild-state` reconstructs SQLite from immutable manifests, and ordinary reconciliation automatically catches the index up if publication completed before an abrupt shutdown.
 
+For a GCS-only mirror, scoring files are never cloned wholesale to local disk. Each file worker downloads one compressed file into `state.work_dir`, verifies it, uploads it directly from that durable file, and removes it before taking more work. `transfer.file_concurrency` bounds the number of retained current partials and `transfer.max_file_size` is enforced both from `Content-Length` and while streaming. On restart, current partials are handled first; obsolete checksum revisions and excess older partials are pruned. With the example defaults, scoring-file scratch is therefore bounded to roughly two 10-GiB files, plus small operational files and at most one metadata/upload staging object. Enabling `targets.local` is different by design: `local.root` then contains a complete persistent mirror and must be sized accordingly.
+
 ## Build
 
 Go 1.25 or newer is required. The release binary is static and never uses CGo:
@@ -45,7 +47,9 @@ Important settings include:
 
 - `upstream.base_urls`: ordered HTTPS/HTTP sources. Requests fall back across this list with bounded exponential backoff, jitter, and `Retry-After` support. Version 1 accepts HTTP(S) URLs; the configured HTTP endpoint is the fallback for intermittent HTTPS issues.
 - `identity.user_agent` and `identity.contact`: identify the operator responsibly to the public upstream.
-- `transfer.concurrency`: bounded inventory and file concurrency; the default is four.
+- `transfer.concurrency`: bounded checksum-sidecar concurrency; the default is four.
+- `transfer.file_concurrency`: concurrent scoring-file download/upload pipelines; the default is two.
+- `transfer.max_file_size`: hard compressed-file scratch limit per pipeline. An oversized or misleading response fails reconciliation without advancing the release.
 - `transfer.lease_duration`: takeover delay after a hard stop. The lease is renewed during active work, so this can stay short without limiting run duration.
 - `transfer.sidecar_limit`: a development-only plan cap. Mutating commands refuse to publish if it would truncate the upstream inventory.
 - `targets.local` / `targets.gcs`: enable either or both stores. With both enabled, GCS is authoritative and its pointer advances first.

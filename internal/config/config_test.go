@@ -21,6 +21,8 @@ gcs = false
 root = "data"
 [transfer]
 concurrency = 2
+file_concurrency = 3
+max_file_size = "2GiB"
 request_timeout = "1m"
 max_attempts = 2
 initial_backoff = "1s"
@@ -49,8 +51,20 @@ checkpoint_max_age = "2h"
 	if c.State.CheckpointMaxAge.Duration.String() != "2h0m0s" {
 		t.Fatalf("checkpoint age=%s", c.State.CheckpointMaxAge.Duration)
 	}
+	if c.Transfer.FileConcurrency != 3 || c.Transfer.MaxFileSize.Bytes != 2<<30 {
+		t.Fatalf("file transfer limits=%d/%d", c.Transfer.FileConcurrency, c.Transfer.MaxFileSize.Bytes)
+	}
 	if !strings.Contains(c.Identity.UserAgent, "ops@example.org") {
 		t.Fatalf("contact missing from %q", c.Identity.UserAgent)
+	}
+}
+
+func TestByteSizeRejectsInvalidValues(t *testing.T) {
+	for _, raw := range []string{"", "0", "1.5GiB", "12XB"} {
+		var size ByteSize
+		if err := size.UnmarshalText([]byte(raw)); err == nil {
+			t.Fatalf("invalid byte size %q was accepted", raw)
+		}
 	}
 }
 

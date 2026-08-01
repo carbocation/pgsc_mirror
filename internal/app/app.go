@@ -418,6 +418,9 @@ func (a *App) reconcile(ctx context.Context, command string) (report RunReport, 
 	if err != nil {
 		return report, err
 	}
+	if _, err := a.prunePartials(inv.entries); err != nil {
+		return report, fmt.Errorf("prune scoring-file scratch: %w", err)
+	}
 	changes := planner.Plan(previous, inv.entries)
 	metadataChanged, err := a.snapshotChanged(ctx, p, model.MetadataKey(p.ReleaseID), inv.metadata)
 	if err != nil {

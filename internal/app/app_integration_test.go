@@ -24,6 +24,7 @@ import (
 	"github.com/pgsc-mirror/pgsc-mirror/internal/model"
 	"github.com/pgsc-mirror/pgsc-mirror/internal/store"
 	localstore "github.com/pgsc-mirror/pgsc-mirror/internal/store/local"
+	"github.com/pgsc-mirror/pgsc-mirror/internal/transfer"
 )
 
 type syntheticUpstream struct {
@@ -615,6 +616,78 @@ func TestReconcileRepairsLaggingSecondaryPointer(t *testing.T) {
 	}
 	if secondaryPointer.ReleaseID != primaryPointer.ReleaseID {
 		t.Fatalf("secondary remains stale: primary=%s secondary=%s", primaryPointer.ReleaseID, secondaryPointer.ReleaseID)
+	}
+}
+
+func TestReconcileEnforcesConfiguredScoringFileLimit(t *testing.T) {
+	up := newSyntheticUpstream()
+	up.set("PGS000001", "larger than a tiny configured cap", "one", true)
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	cfg := integrationConfig(t.TempDir(), srv.URL)
+	cfg.Transfer.MaxFileSize = config.ByteSize{Bytes: 8}
+	a, err := New(context.Background(), cfg, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if _, err := a.Reconcile(context.Background(), false); !errors.Is(err, transfer.ErrSizeLimit) {
+		t.Fatalf("got %v, want scoring-file size-limit failure", err)
+	}
+	partials, err := filepath.Glob(filepath.Join(a.Config.State.WorkDir, "partials", "*.part"))
+	if err != nil || len(partials) != 0 {
+		t.Fatalf("oversized partial was retained: files=%v err=%v", partials, err)
+	}
+}
+
+func TestPrunePartialsBoundsRetainedRestartFiles(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.State.WorkDir = t.TempDir()
+	cfg.Transfer.FileConcurrency = 2
+	a := &App{Config: cfg}
+	now := time.Now()
+	entries := []model.Entry{
+		{PGSID: "PGS000001", SourceMD5: strings.Repeat("1", 32), Status: model.StatusReady},
+		{PGSID: "PGS000002", SourceMD5: strings.Repeat("2", 32), Status: model.StatusReady},
+		{PGSID: "PGS000003", SourceMD5: strings.Repeat("3", 32), Status: model.StatusReady},
+	}
+	for i := range entries {
+		part := a.partialPath(&entries[i])
+		if err := os.MkdirAll(filepath.Dir(part), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(part, []byte(entries[i].PGSID), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(part+".json", []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		stamp := now.Add(time.Duration(i) * time.Minute)
+		if err := os.Chtimes(part, stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	obsolete := filepath.Join(cfg.State.WorkDir, "partials", "PGS999999-"+strings.Repeat("f", 32)+".part")
+	if err := os.WriteFile(obsolete, []byte("obsolete"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.prunePartials(entries); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(a.partialPath(&entries[0])); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("oldest excess partial remains: %v", err)
+	}
+	for i := 1; i < len(entries); i++ {
+		if _, err := os.Stat(a.partialPath(&entries[i])); err != nil {
+			t.Fatalf("recent partial %d was removed: %v", i, err)
+		}
+	}
+	if _, err := os.Stat(obsolete); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("obsolete checksum partial remains: %v", err)
+	}
+	order := a.blobJobOrder(entries)
+	if order[0] != 1 || order[1] != 2 {
+		t.Fatalf("retained partials were not prioritized: %v", order)
 	}
 }
 

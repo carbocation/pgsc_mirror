@@ -15,7 +15,13 @@ user_agent = "pgsc-mirror/0.1"
 contact = "mirror-operator@example.org"
 
 [transfer]
+# Concurrent small checksum-sidecar requests.
 concurrency = 4
+# Scoring files are downloaded, verified, uploaded, and removed per worker.
+# With these defaults, retained scoring partials are bounded to two files and
+# each compressed file is capped at 10 GiB.
+file_concurrency = 2
+max_file_size = "10GiB"
 request_timeout = "2m"
 max_attempts = 5
 initial_backoff = "1s"

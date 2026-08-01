@@ -4,8 +4,10 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +25,36 @@ func (d *Duration) UnmarshalText(text []byte) error {
 		return err
 	}
 	d.Duration = v
+	return nil
+}
+
+// ByteSize is a TOML byte count such as "10GiB" or "500MB".
+type ByteSize struct{ Bytes int64 }
+
+func (s *ByteSize) UnmarshalText(text []byte) error {
+	raw := strings.TrimSpace(string(text))
+	upper := strings.ToUpper(raw)
+	units := []struct {
+		suffix string
+		value  uint64
+	}{
+		{"TIB", 1 << 40}, {"GIB", 1 << 30}, {"MIB", 1 << 20}, {"KIB", 1 << 10},
+		{"TB", 1_000_000_000_000}, {"GB", 1_000_000_000}, {"MB", 1_000_000}, {"KB", 1_000}, {"B", 1},
+	}
+	number := raw
+	multiplier := uint64(1)
+	for _, unit := range units {
+		if strings.HasSuffix(upper, unit.suffix) {
+			number = strings.TrimSpace(raw[:len(raw)-len(unit.suffix)])
+			multiplier = unit.value
+			break
+		}
+	}
+	n, err := strconv.ParseUint(number, 10, 64)
+	if err != nil || n == 0 || n > uint64(math.MaxInt64)/multiplier {
+		return fmt.Errorf("invalid positive byte size %q", raw)
+	}
+	s.Bytes = int64(n * multiplier)
 	return nil
 }
 
@@ -46,13 +78,15 @@ type Upstream struct {
 }
 
 type Transfer struct {
-	Concurrency    int      `toml:"concurrency"`
-	RequestTimeout Duration `toml:"request_timeout"`
-	MaxAttempts    int      `toml:"max_attempts"`
-	InitialBackoff Duration `toml:"initial_backoff"`
-	MaxBackoff     Duration `toml:"max_backoff"`
-	LeaseDuration  Duration `toml:"lease_duration"`
-	SidecarLimit   int      `toml:"sidecar_limit"`
+	Concurrency     int      `toml:"concurrency"`
+	FileConcurrency int      `toml:"file_concurrency"`
+	MaxFileSize     ByteSize `toml:"max_file_size"`
+	RequestTimeout  Duration `toml:"request_timeout"`
+	MaxAttempts     int      `toml:"max_attempts"`
+	InitialBackoff  Duration `toml:"initial_backoff"`
+	MaxBackoff      Duration `toml:"max_backoff"`
+	LeaseDuration   Duration `toml:"lease_duration"`
+	SidecarLimit    int      `toml:"sidecar_limit"`
 }
 
 type Targets struct {
@@ -100,12 +134,14 @@ func Defaults() Config {
 			MetadataCSV: "metadata/pgs_all_metadata_scores.csv",
 		},
 		Transfer: Transfer{
-			Concurrency:    4,
-			RequestTimeout: Duration{2 * time.Minute},
-			MaxAttempts:    5,
-			InitialBackoff: Duration{time.Second},
-			MaxBackoff:     Duration{30 * time.Second},
-			LeaseDuration:  Duration{15 * time.Minute},
+			Concurrency:     4,
+			FileConcurrency: 2,
+			MaxFileSize:     ByteSize{10 << 30},
+			RequestTimeout:  Duration{2 * time.Minute},
+			MaxAttempts:     5,
+			InitialBackoff:  Duration{time.Second},
+			MaxBackoff:      Duration{30 * time.Second},
+			LeaseDuration:   Duration{15 * time.Minute},
 		},
 		Targets:   Targets{Local: true},
 		Local:     Local{Root: "./mirror"},
@@ -173,6 +209,12 @@ func (c Config) Validate() error {
 	}
 	if c.Transfer.Concurrency < 1 || c.Transfer.Concurrency > 64 {
 		return errors.New("transfer.concurrency must be between 1 and 64")
+	}
+	if c.Transfer.FileConcurrency < 1 || c.Transfer.FileConcurrency > 64 {
+		return errors.New("transfer.file_concurrency must be between 1 and 64")
+	}
+	if c.Transfer.MaxFileSize.Bytes <= 0 {
+		return errors.New("transfer.max_file_size must be positive")
 	}
 	if c.Transfer.MaxAttempts < 1 {
 		return errors.New("transfer.max_attempts must be positive")
