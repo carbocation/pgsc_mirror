@@ -14,6 +14,8 @@ A consumer resolves `LATEST.json`, pins the referenced immutable manifest, and r
 
 The source MD5 is the work identity. A PGS ID whose MD5 is already complete under the same derivative tool/configuration version does not need to be processed again. A changed MD5 is new work even when the PGS ID is unchanged. Withdrawn entries remain historical inputs and should be retained according to the derivative product's own policy.
 
+A mirror release can also change solely because `pgsc-mirror` refreshed a versioned annotation. Such a successor may contain the same raw MD5s and upstream metadata snapshots as its predecessor but a newer manifest annotation. Consumers should therefore diff work by source MD5 and their own tool/configuration version, while separately deciding whether a new annotation version changes validation or quarantine decisions.
+
 Header `type` is a broad, human-readable classification. `schema_sha256` distinguishes exact ordered column and metadata-key variants within that type. Consumers that require particular fields should validate `columns` directly rather than assuming that every file sharing a type has identical optional columns. An `unrecognized` or `unreadable` observation is explicit quarantine input, not permission to guess.
 
 ## Private continuous jobs

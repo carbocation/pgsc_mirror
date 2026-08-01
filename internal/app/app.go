@@ -422,6 +422,9 @@ func (a *App) reconcile(ctx context.Context, command string) (report RunReport, 
 	if err != nil {
 		return report, err
 	}
+	if err := requireSupportedAnnotations(p, previous); err != nil {
+		return report, err
+	}
 	repairedTargets, err := a.convergeTargets(ctx, p, previous)
 	if err != nil {
 		return report, err
@@ -566,12 +569,17 @@ func (a *App) Update(ctx context.Context, dryRun bool) (report RunReport, runErr
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return RunReport{}, err
 	}
-	if err == nil && pointer.HeaderInspectorVersion < scoreheader.InspectorVersion {
-		if err := a.State.FinishRun(ctx, checkRun, nil); err != nil {
+	var annotation AnnotationReport
+	if err == nil {
+		if err := requireSupportedAnnotations(pointer, nil); err != nil {
 			return report, err
 		}
-		finishCheck = false
-		return a.reconcile(ctx, "update")
+		if pointer.HeaderInspectorVersion < scoreheader.InspectorVersion {
+			annotation, err = a.Annotate(ctx, false)
+			if err != nil {
+				return report, fmt.Errorf("refresh stored-object annotations: %w", err)
+			}
+		}
 	}
 	scoreS, scoreOK, err := a.State.Sentinel(ctx, "score_list")
 	if err != nil {
@@ -590,13 +598,24 @@ func (a *App) Update(ctx context.Context, dryRun bool) (report RunReport, runErr
 		return RunReport{}, err
 	}
 	if scoreOK && metaOK && scoreDoc.NotModified && metaDoc.NotModified {
+		if annotation.Changed {
+			return RunReport{Command: "update", ReleaseID: annotation.ReleaseID, Changed: true, Message: "published stored-object annotations; upstream sentinels are unchanged"}, nil
+		}
 		return RunReport{Command: "update", Changed: false, Message: "upstream sentinels are unchanged"}, nil
 	}
 	if err := a.State.FinishRun(ctx, checkRun, nil); err != nil {
 		return report, err
 	}
 	finishCheck = false
-	return a.reconcile(ctx, "update")
+	reconciled, err := a.reconcile(ctx, "update")
+	if err == nil && annotation.Changed {
+		reconciled.Changed = true
+		if reconciled.ReleaseID == "" {
+			reconciled.ReleaseID = annotation.ReleaseID
+		}
+		reconciled.Message = "published stored-object annotations; " + reconciled.Message
+	}
+	return reconciled, err
 }
 
 func headerInspectionsNeeded(entries []model.Entry) int {
@@ -607,6 +626,18 @@ func headerInspectionsNeeded(entries []model.Entry) int {
 		}
 	}
 	return count
+}
+
+func requireSupportedAnnotations(pointer model.Pointer, entries []model.Entry) error {
+	if pointer.HeaderInspectorVersion > scoreheader.InspectorVersion {
+		return fmt.Errorf("published header inspector version %d is newer than this binary's version %d; upgrade pgsc-mirror before publishing", pointer.HeaderInspectorVersion, scoreheader.InspectorVersion)
+	}
+	for i := range entries {
+		if entries[i].Status == model.StatusReady && entries[i].Header != nil && entries[i].Header.InspectorVersion > scoreheader.InspectorVersion {
+			return fmt.Errorf("%s has header inspector version %d, newer than this binary's version %d; upgrade pgsc-mirror before publishing", entries[i].PGSID, entries[i].Header.InspectorVersion, scoreheader.InspectorVersion)
+		}
+	}
+	return nil
 }
 
 type heldLease struct {

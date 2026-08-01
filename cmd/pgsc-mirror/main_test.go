@@ -42,6 +42,13 @@ func TestSplitCommandDefaultsToRun(t *testing.T) {
 	}
 }
 
+func TestSplitCommandRecognizesAnnotate(t *testing.T) {
+	command, args, err := splitCommand([]string{"--config", "mirror.toml", "annotate", "--dry-run"})
+	if err != nil || command != "annotate" || strings.Join(args, " ") != "--config mirror.toml --dry-run" {
+		t.Fatalf("command=%q args=%v err=%v", command, args, err)
+	}
+}
+
 func TestServiceReporterJSONLines(t *testing.T) {
 	var out strings.Builder
 	report := serviceReporter(&out, true)

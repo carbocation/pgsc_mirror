@@ -28,7 +28,7 @@ var (
 	buildDate = "unknown"
 )
 
-var commands = map[string]bool{"run": true, "probe": true, "plan": true, "reconcile": true, "update": true, "pull": true, "verify": true, "status": true, "rebuild-state": true, "gc": true}
+var commands = map[string]bool{"run": true, "probe": true, "plan": true, "reconcile": true, "update": true, "annotate": true, "pull": true, "verify": true, "status": true, "rebuild-state": true, "gc": true}
 
 type stringList []string
 
@@ -101,7 +101,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error: run requires transfer.sidecar_limit = 0")
 		return 2
 	}
-	mutating := command == "run" || ((command == "reconcile" || command == "update" || command == "pull" || command == "rebuild-state") && !o.dryRun) || command == "status"
+	mutating := command == "run" || ((command == "reconcile" || command == "update" || command == "annotate" || command == "pull" || command == "rebuild-state") && !o.dryRun) || command == "status"
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	a, err := app.New(ctx, cfg, mutating)
@@ -139,6 +139,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		result, err = a.Reconcile(ctx, o.dryRun)
 	case "update":
 		result, err = a.Update(ctx, o.dryRun)
+	case "annotate":
+		result, err = a.Annotate(ctx, o.dryRun)
 	case "pull":
 		result, err = a.Pull(ctx, o.dryRun)
 	case "verify":
@@ -197,7 +199,7 @@ func splitCommand(args []string) (string, []string, error) {
 func usage(w io.Writer) {
 	fmt.Fprintln(w, "usage: pgsc-mirror --config FILE [run]")
 	fmt.Fprintln(w, "       pgsc-mirror [global flags] <command> [flags]")
-	fmt.Fprintln(w, "commands: run, probe, plan, reconcile, update, pull, verify, status, rebuild-state, gc, version")
+	fmt.Fprintln(w, "commands: run, probe, plan, reconcile, update, annotate, pull, verify, status, rebuild-state, gc, version")
 }
 
 func serviceReporter(w io.Writer, structured bool) app.ServiceReporter {
@@ -306,6 +308,17 @@ func printHuman(w io.Writer, v any) {
 		}
 		if r.Plan != nil {
 			printHuman(w, *r.Plan)
+		}
+	case app.AnnotationReport:
+		fmt.Fprintf(w, "annotate: %s\n", r.Message)
+		fmt.Fprintf(w, "source release: %s\n", r.SourceReleaseID)
+		if r.ReleaseID != "" {
+			fmt.Fprintln(w, "release:", r.ReleaseID)
+		}
+		fmt.Fprintf(w, "available=%d inspected=%d updated=%d unchanged=%d recognized=%d unrecognized=%d unreadable=%d failed=%d\n",
+			r.Available, r.Inspected, r.Updated, r.Unchanged, r.Recognized, r.Unrecognized, r.Unreadable, r.Failed)
+		for _, failure := range r.Failures {
+			fmt.Fprintf(w, "%s\t%s\n", failure.PGSID, failure.Error)
 		}
 	case app.VerifyReport:
 		for _, t := range r.Targets {

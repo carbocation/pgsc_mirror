@@ -17,7 +17,7 @@ import (
 
 const harmonizedHeaderFixture = "###PGS CATALOG SCORING FILE\n#format_version=2.0\n#pgs_id=PGS000001\n##HARMONIZATION DETAILS\n#HmPOS_build=GRCh38\nrsID\teffect_allele\tother_allele\teffect_weight\thm_source\thm_rsID\thm_chr\thm_pos\nrs1\tA\tG\t0.25\tENSEMBL\trs1\t1\t42\n"
 
-func TestEnsureBlobBackfillsHeaderFromStoredObject(t *testing.T) {
+func TestEnsureBlobAnnotatesHeaderFromStoredObject(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	ls, err := localstore.New(root)
@@ -40,14 +40,14 @@ func TestEnsureBlobBackfillsHeaderFromStoredObject(t *testing.T) {
 		t.Fatal(err)
 	}
 	if entry.Header == nil || entry.Header.Type != scoreheader.TypeHarmonizedV2 || entry.Header.Status != scoreheader.StatusRecognized {
-		t.Fatalf("header was not backfilled: %+v", entry.Header)
+		t.Fatalf("header was not annotated: %+v", entry.Header)
 	}
 	if entry.SizeBytes != int64(len(data)) {
 		t.Fatalf("size=%d, want %d", entry.SizeBytes, len(data))
 	}
 }
 
-func TestUpdateBackfillsLegacyManifestHeader(t *testing.T) {
+func TestUpdateAnnotatesLegacyManifestHeader(t *testing.T) {
 	up := newSyntheticUpstream()
 	up.set("PGS000001", harmonizedHeaderFixture, "CC0", true)
 	srv := httptest.NewServer(up)
@@ -100,14 +100,14 @@ func TestUpdateBackfillsLegacyManifestHeader(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !report.Changed || report.ReleaseID == legacyID {
-		t.Fatalf("legacy header was not backfilled: %+v", report)
+		t.Fatalf("legacy header was not annotated: %+v", report)
 	}
 	_, entries, err := a.latest(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(entries) != 1 || entries[0].Header == nil || entries[0].Header.Type != scoreheader.TypeHarmonizedV2 {
-		t.Fatalf("backfilled manifest lacks header observation: %+v", entries)
+		t.Fatalf("annotated manifest lacks header observation: %+v", entries)
 	}
 }
 

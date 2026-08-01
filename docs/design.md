@@ -54,4 +54,14 @@ Every new or revised verified scoring file is inspected through its gzip stream 
 
 Inspection stops at the table header and is bounded to 2 MiB or 10,000 decompressed header lines. A checksum-valid upstream anomaly is preserved byte-for-byte and marked `unrecognized` or `unreadable`; it is not silently normalized or dropped.
 
-Unchanged blobs reuse their versioned observation. A complete reconciliation can backfill an older manifest that lacks a current header observation by reading only the stored blobs' headers and publishing a new immutable release. `LATEST.json` records the completed inspector version so a lightweight update can trigger that one-time backfill when necessary.
+Unchanged blobs reuse their versioned observation. `LATEST.json` records the completed inspector version so the service can detect older observations.
+
+## Stored-object annotation
+
+`annotate` refreshes versioned descriptive metadata exclusively from objects already owned by the mirror. It pins the current immutable release, reads its stored blobs and metadata snapshots, and publishes a new immutable manifest and pointer only after every required inspection succeeds. It never calls the PGS Catalog inventory, metadata, sidecar, or scoring-file endpoints.
+
+Header inspection is the first annotation implemented through this path. An older release with absent or stale header observations can therefore be upgraded without a complete upstream reconciliation. The long-lived service performs this refresh automatically before its normal lightweight update check when the current pointer advertises an older inspector version. A newer binary may publish an annotation-only successor whose raw blob MD5s and stored upstream snapshots are identical to its predecessor.
+
+Dry-run mode performs the stored reads and reports the result but acquires no lease and writes no objects. A real run uses the same renewable publication lease as reconciliation, repairs lagging configured targets first, and advances pointers with compare-and-swap. Any unreadable gzip is recorded as an explicit descriptive result; an operational read or publication failure leaves the prior release current. A binary refuses to publish over annotation data produced by a newer inspector version.
+
+This mechanism is deliberately limited to reproducible, mirror-level descriptions of preserved objects. It does not normalize variants, rewrite scoring files, liftover coordinates, or create analytical derivatives; those belong in a downstream compiler.

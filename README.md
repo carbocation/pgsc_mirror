@@ -91,12 +91,15 @@ No credentials belong in TOML. GCS uses Application Default Credentials. All ins
 | `verify` | Verifies a deterministic sample; add `--full` to verify every blob. |
 | `plan` | Reads the upstream inventory and reports proposed changes without publishing. |
 | `update` | Performs one lightweight change check and reconciles if needed. |
+| `annotate` | Refreshes versioned descriptive metadata from already mirrored objects, without contacting PGS Catalog. |
 | `pull` | Makes a local target match the completed release currently published in GCS. |
 | `rebuild-state` | Reconstructs SQLite from immutable release manifests. |
 | `gc` | Reports conservative retention candidates; deletion requires `--apply`. |
 | `probe` | Checks only explicitly named scores and can exercise GCS conditional writes. |
 
 Every command accepts `--config`. Reports accept `--json`. The explicit long-lived form is `pgsc-mirror --config config.toml run`.
+
+`annotate --dry-run` reports how many current scoring files need fresh annotations without acquiring a publication lease or writing mirror objects. `annotate` reads the current immutable blobs and stored metadata snapshots, then publishes an annotation-only successor release if needed. Header inspection is the first supported annotation; normalization, liftover, and other analytical transformations remain downstream work. The long-lived mode performs this refresh automatically when its binary supports a newer annotation version.
 
 ## Build
 
