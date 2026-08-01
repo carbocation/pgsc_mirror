@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/pgsc-mirror/pgsc-mirror/docs/latest.schema.json",
+  "title": "pgsc-mirror latest release pointer",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "release_id", "manifest_key", "manifest_sha256", "score_list_sha256",
+    "metadata_sha256", "published_at", "entry_count", "genome_build"
+  ],
+  "properties": {
+    "release_id": {"type": "string", "pattern": "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$"},
+    "manifest_key": {"type": "string", "pattern": "^releases/.+/manifest\\.jsonl\\.gz$"},
+    "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "score_list_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "metadata_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "published_at": {"type": "string", "format": "date-time"},
+    "entry_count": {"type": "integer", "minimum": 0},
+    "genome_build": {"const": "GRCh38"}
+  }
+}
+

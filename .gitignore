@@ -1,0 +1,18 @@
+# Build artifacts
+/pgsc-mirror
+*.linux
+dist/
+
+# Operational state and local mirror data
+*.db
+*.db-shm
+*.db-wal
+*.part
+*.part.json
+.pgsc-mirror/
+mirror/
+
+# Editor and OS metadata
+.DS_Store
+.idea/
+.vscode/

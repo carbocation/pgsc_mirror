@@ -1,0 +1,427 @@
+package app
+
+import (
+	"bytes"
+	"context"
+	"crypto/md5"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/pgsc-mirror/pgsc-mirror/internal/manifest"
+	"github.com/pgsc-mirror/pgsc-mirror/internal/model"
+	"github.com/pgsc-mirror/pgsc-mirror/internal/state"
+	"github.com/pgsc-mirror/pgsc-mirror/internal/store"
+)
+
+func (a *App) Verify(ctx context.Context, full bool, sample int) (VerifyReport, error) {
+	var report VerifyReport
+	var failed bool
+	for _, t := range a.targets {
+		result := VerifyTarget{Target: t.Name()}
+		p, _, err := a.readPointer(ctx, t.Store)
+		if err != nil {
+			result.Failures = append(result.Failures, err.Error())
+			report.Targets = append(report.Targets, result)
+			failed = true
+			continue
+		}
+		result.ReleaseID = p.ReleaseID
+		entries, _, err := a.readManifest(ctx, t.Store, p)
+		if err != nil {
+			result.Failures = append(result.Failures, err.Error())
+			report.Targets = append(report.Targets, result)
+			failed = true
+			continue
+		}
+		if err := verifySnapshot(ctx, t.Store, model.ScoreListKey(p.ReleaseID), p.ScoreListSHA256); err != nil {
+			result.Failures = append(result.Failures, "score list: "+err.Error())
+			failed = true
+		}
+		if err := verifySnapshot(ctx, t.Store, model.MetadataKey(p.ReleaseID), p.MetadataSHA256); err != nil {
+			result.Failures = append(result.Failures, "metadata: "+err.Error())
+			failed = true
+		}
+		var active []model.Entry
+		for _, e := range entries {
+			if e.Status == model.StatusReady {
+				active = append(active, e)
+			}
+		}
+		if !full {
+			if sample <= 0 {
+				sample = a.Config.Verify.DefaultSample
+			}
+			if sample < len(active) {
+				active = active[:sample]
+			}
+		}
+		for _, e := range active {
+			result.Checked++
+			if err := verifyObject(ctx, t.Store, e); err != nil {
+				result.Failures = append(result.Failures, e.PGSID+": "+err.Error())
+				failed = true
+			}
+		}
+		report.Targets = append(report.Targets, result)
+	}
+	if failed {
+		return report, errors.New("verification failed")
+	}
+	return report, nil
+}
+
+func verifySnapshot(ctx context.Context, st store.Store, key, expected string) error {
+	if expected == "" {
+		return nil
+	}
+	r, _, err := st.Open(ctx, key)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, r); err != nil {
+		return err
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != expected {
+		return fmt.Errorf("SHA-256 is %s, want %s", got, expected)
+	}
+	return nil
+}
+
+func verifyObject(ctx context.Context, st store.Store, e model.Entry) error {
+	r, info, err := st.Open(ctx, e.BlobKey)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	h := md5.New()
+	n, err := io.Copy(h, r)
+	if err != nil {
+		return err
+	}
+	if n != e.SizeBytes {
+		return fmt.Errorf("size is %d, manifest says %d", n, e.SizeBytes)
+	}
+	if info.Size != e.SizeBytes {
+		return fmt.Errorf("stored size is %d, manifest says %d", info.Size, e.SizeBytes)
+	}
+	got := hex.EncodeToString(h.Sum(nil))
+	if got != e.SourceMD5 {
+		return fmt.Errorf("MD5 is %s, want %s", got, e.SourceMD5)
+	}
+	return nil
+}
+
+func (a *App) Pull(ctx context.Context, dryRun bool) (RunReport, error) {
+	source, ok := a.target("gcs")
+	if !ok {
+		return RunReport{}, errors.New("pull requires the GCS target")
+	}
+	dest, ok := a.target("local")
+	if !ok {
+		return RunReport{}, errors.New("pull requires the local target")
+	}
+	p, _, err := a.readPointer(ctx, source.Store)
+	if err != nil {
+		return RunReport{}, err
+	}
+	entries, manifestBytes, err := a.readManifest(ctx, source.Store, p)
+	if err != nil {
+		return RunReport{}, err
+	}
+	if dryRun {
+		return RunReport{Command: "pull", ReleaseID: p.ReleaseID, Changed: true, Message: fmt.Sprintf("dry run; would make %d manifest entries available locally", len(entries))}, nil
+	}
+	for _, e := range entries {
+		if e.Status != model.StatusReady {
+			continue
+		}
+		if err := verifyObject(ctx, dest.Store, e); err == nil {
+			continue
+		}
+		if info, statErr := dest.Stat(ctx, e.BlobKey); statErr == nil {
+			gen := info.Generation
+			if delErr := dest.Delete(ctx, e.BlobKey, store.DeleteOptions{GenerationMatch: &gen}); delErr != nil {
+				return RunReport{}, fmt.Errorf("remove corrupt local %s: %w", e.BlobKey, delErr)
+			}
+		} else if !errors.Is(statErr, store.ErrNotFound) {
+			return RunReport{}, statErr
+		}
+		r, _, err := source.Open(ctx, e.BlobKey)
+		if err != nil {
+			return RunReport{}, err
+		}
+		info, err := dest.Put(ctx, e.BlobKey, r, store.PutOptions{DoesNotExist: true, ContentType: "application/gzip"})
+		r.Close()
+		if err != nil {
+			return RunReport{}, err
+		}
+		if got := hex.EncodeToString(info.MD5); got != e.SourceMD5 {
+			gen := info.Generation
+			_ = dest.Delete(ctx, e.BlobKey, store.DeleteOptions{GenerationMatch: &gen})
+			return RunReport{}, fmt.Errorf("source object %s has MD5 %s, want %s", e.BlobKey, got, e.SourceMD5)
+		}
+	}
+	metaReader, _, err := source.Open(ctx, model.MetadataKey(p.ReleaseID))
+	if err != nil {
+		return RunReport{}, err
+	}
+	metadata, err := io.ReadAll(metaReader)
+	metaReader.Close()
+	if err != nil {
+		return RunReport{}, err
+	}
+	if err := putImmutable(ctx, dest.Store, model.MetadataKey(p.ReleaseID), metadata, store.PutOptions{DoesNotExist: true, ContentType: "text/csv"}); err != nil {
+		return RunReport{}, err
+	}
+	scoreReader, _, err := source.Open(ctx, model.ScoreListKey(p.ReleaseID))
+	if err != nil {
+		return RunReport{}, err
+	}
+	scoreList, err := io.ReadAll(scoreReader)
+	scoreReader.Close()
+	if err != nil {
+		return RunReport{}, err
+	}
+	if err := putImmutable(ctx, dest.Store, model.ScoreListKey(p.ReleaseID), scoreList, store.PutOptions{DoesNotExist: true, ContentType: "text/plain"}); err != nil {
+		return RunReport{}, err
+	}
+	if err := putImmutable(ctx, dest.Store, p.ManifestKey, manifestBytes, store.PutOptions{DoesNotExist: true, ContentType: "application/gzip", Metadata: map[string]string{"format": "jsonl"}}); err != nil {
+		return RunReport{}, err
+	}
+	pointerBytes, _ := manifest.PointerJSON(p)
+	_, oldInfo, readErr := a.readPointer(ctx, dest.Store)
+	opts := store.PutOptions{ContentType: "application/json"}
+	if errors.Is(readErr, store.ErrNotFound) {
+		opts.DoesNotExist = true
+	} else if readErr != nil {
+		return RunReport{}, readErr
+	} else {
+		gen := oldInfo.Generation
+		opts.GenerationMatch = &gen
+	}
+	if _, err := dest.Put(ctx, model.LatestKey, bytes.NewReader(pointerBytes), opts); err != nil {
+		return RunReport{}, err
+	}
+	if a.State != nil {
+		if err := a.State.RecordRelease(ctx, p, entries, true); err != nil {
+			return RunReport{}, err
+		}
+	}
+	return RunReport{Command: "pull", ReleaseID: p.ReleaseID, Changed: true, Message: "local target now pins the published GCS release"}, nil
+}
+
+func (a *App) Status(ctx context.Context) (StatusReport, error) {
+	var report StatusReport
+	if a.State != nil {
+		s, err := a.State.Summary(ctx)
+		if err != nil {
+			return report, err
+		}
+		report.State = s
+	}
+	for _, t := range a.targets {
+		ts := TargetStatus{Target: t.Name()}
+		p, _, err := a.readPointer(ctx, t.Store)
+		if errors.Is(err, store.ErrNotFound) {
+			ts.Error = "no completed release"
+		} else if err != nil {
+			ts.Error = err.Error()
+		} else {
+			ts.ReleaseID = p.ReleaseID
+			ts.PublishedAt = &p.PublishedAt
+			ts.Entries = p.EntryCount
+		}
+		report.Targets = append(report.Targets, ts)
+	}
+	return report, nil
+}
+
+func (a *App) RebuildState(ctx context.Context, dryRun bool) (RunReport, error) {
+	if len(a.targets) == 0 {
+		return RunReport{}, errors.New("no canonical target")
+	}
+	t := a.targets[0]
+	latest, _, err := a.readPointer(ctx, t.Store)
+	if err != nil {
+		return RunReport{}, err
+	}
+	objects, err := t.List(ctx, "releases")
+	if err != nil {
+		return RunReport{}, err
+	}
+	var releases []state.RebuildRelease
+	for _, obj := range objects {
+		if !strings.HasSuffix(obj.Key, "/manifest.jsonl.gz") {
+			continue
+		}
+		r, _, err := t.Open(ctx, obj.Key)
+		if err != nil {
+			return RunReport{}, err
+		}
+		b, err := io.ReadAll(r)
+		r.Close()
+		if err != nil {
+			return RunReport{}, err
+		}
+		entries, err := manifest.Decode(bytes.NewReader(b))
+		if err != nil {
+			return RunReport{}, fmt.Errorf("%s: %w", obj.Key, err)
+		}
+		parts := strings.Split(obj.Key, "/")
+		if len(parts) < 3 {
+			return RunReport{}, fmt.Errorf("invalid manifest key %s", obj.Key)
+		}
+		id := parts[1]
+		published, _ := time.Parse("20060102T150405Z", strings.Split(id, "-")[0])
+		if id == latest.ReleaseID {
+			published = latest.PublishedAt
+		}
+		sum := sha256.Sum256(b)
+		scoreSHA, err := objectSHA256(ctx, t.Store, model.ScoreListKey(id))
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return RunReport{}, err
+		}
+		metadataSHA, err := objectSHA256(ctx, t.Store, model.MetadataKey(id))
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return RunReport{}, err
+		}
+		p := model.Pointer{ReleaseID: id, ManifestKey: obj.Key, ManifestSHA256: hex.EncodeToString(sum[:]), ScoreListSHA256: scoreSHA, MetadataSHA256: metadataSHA, PublishedAt: published, EntryCount: len(entries), GenomeBuild: a.Config.GenomeBuild}
+		releases = append(releases, state.RebuildRelease{Pointer: p, Entries: entries})
+	}
+	sort.Slice(releases, func(i, j int) bool {
+		if releases[i].Pointer.ReleaseID == latest.ReleaseID {
+			return false
+		}
+		if releases[j].Pointer.ReleaseID == latest.ReleaseID {
+			return true
+		}
+		return releases[i].Pointer.ReleaseID < releases[j].Pointer.ReleaseID
+	})
+	if dryRun {
+		return RunReport{Command: "rebuild-state", Message: fmt.Sprintf("dry run; found %d immutable releases", len(releases))}, nil
+	}
+	if a.State == nil {
+		return RunReport{}, errors.New("writable state is not open")
+	}
+	if err := a.State.Rebuild(ctx, releases); err != nil {
+		return RunReport{}, err
+	}
+	return RunReport{Command: "rebuild-state", Changed: true, Message: fmt.Sprintf("rebuilt SQLite from %d immutable releases", len(releases))}, nil
+}
+
+func objectSHA256(ctx context.Context, st store.Store, key string) (string, error) {
+	r, _, err := st.Open(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	defer r.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, r); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func (a *App) GC(ctx context.Context, apply bool) (GCReport, error) {
+	report := GCReport{DryRun: !apply}
+	cutoff := a.now().Add(-a.Config.Retention.MissingGrace.Duration)
+	for _, t := range a.targets {
+		latest, _, err := a.readPointer(ctx, t.Store)
+		if err != nil {
+			return report, err
+		}
+		objects, err := t.List(ctx, "releases")
+		if err != nil {
+			return report, err
+		}
+		type rel struct {
+			id       string
+			manifest store.ObjectInfo
+			all      []store.ObjectInfo
+			entries  []model.Entry
+		}
+		byID := map[string]*rel{}
+		for _, obj := range objects {
+			parts := strings.Split(obj.Key, "/")
+			if len(parts) < 3 {
+				continue
+			}
+			r := byID[parts[1]]
+			if r == nil {
+				r = &rel{id: parts[1]}
+				byID[r.id] = r
+			}
+			r.all = append(r.all, obj)
+			if strings.HasSuffix(obj.Key, "/manifest.jsonl.gz") {
+				r.manifest = obj
+			}
+		}
+		var rels []*rel
+		for _, r := range byID {
+			if r.manifest.Key != "" {
+				rels = append(rels, r)
+			}
+		}
+		sort.Slice(rels, func(i, j int) bool { return rels[i].id > rels[j].id })
+		keep := map[string]bool{latest.ReleaseID: true}
+		for i, r := range rels {
+			if i < a.Config.Retention.KeepReleases {
+				keep[r.id] = true
+			}
+		}
+		for _, r := range rels {
+			if keep[r.id] || r.manifest.LastModified.After(cutoff) {
+				continue
+			}
+			for _, obj := range r.all {
+				report.Items = append(report.Items, GCItem{Target: t.Name(), Key: obj.Key, Reason: "release retention expired", Size: obj.Size})
+			}
+		}
+		refs := map[string]bool{}
+		for _, r := range rels {
+			if !keep[r.id] && r.manifest.LastModified.Before(cutoff) {
+				continue
+			}
+			rd, _, err := t.Open(ctx, r.manifest.Key)
+			if err != nil {
+				return report, err
+			}
+			entries, err := manifest.Decode(rd)
+			rd.Close()
+			if err != nil {
+				return report, err
+			}
+			for _, e := range entries {
+				refs[e.BlobKey] = true
+			}
+		}
+		blobs, err := t.List(ctx, "blobs/md5")
+		if err != nil {
+			return report, err
+		}
+		for _, obj := range blobs {
+			if !refs[obj.Key] && obj.LastModified.Before(cutoff) {
+				report.Items = append(report.Items, GCItem{Target: t.Name(), Key: obj.Key, Reason: "unreferenced blob past grace period", Size: obj.Size})
+			}
+		}
+		if apply {
+			for _, item := range report.Items {
+				if item.Target != t.Name() {
+					continue
+				}
+				if err := t.Delete(ctx, item.Key, store.DeleteOptions{}); err != nil && !errors.Is(err, store.ErrNotFound) {
+					return report, err
+				}
+			}
+		}
+	}
+	return report, nil
+}

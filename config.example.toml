@@ -1,0 +1,52 @@
+# Public example configuration. Copy this file and set local deployment values.
+genome_build = "GRCh38"
+
+[upstream]
+base_urls = [
+  "https://ftp.ebi.ac.uk/pub/databases/spot/pgs",
+  "http://ftp.ebi.ac.uk/pub/databases/spot/pgs",
+]
+score_list = "pgs_scores_list.txt"
+metadata_csv = "metadata/pgs_all_metadata_scores.csv"
+
+[identity]
+# Operators should include a real contact address for responsible upstream use.
+user_agent = "pgsc-mirror/0.1"
+contact = "mirror-operator@example.org"
+
+[transfer]
+concurrency = 4
+request_timeout = "2m"
+max_attempts = 5
+initial_backoff = "1s"
+max_backoff = "30s"
+lease_duration = "2h"
+# Development safeguard only. Zero means all sidecars. A nonzero limit is
+# permitted for plan, but reconcile/update refuse to publish a partial release.
+sidecar_limit = 0
+
+[targets]
+local = true
+gcs = false
+
+[local]
+root = "./mirror"
+
+[gcs]
+bucket = ""
+prefix = "pgsc-mirror"
+billing_project = ""
+
+[state]
+# Defaults to <local.root>/.pgsc-mirror/state.db when omitted.
+path = "./mirror/.pgsc-mirror/state.db"
+
+[retention]
+missing_grace = "720h" # 30 days
+keep_releases = 10
+
+[verify]
+default_sample = 100
+# Advisory only: scheduling remains external to the one-shot binary.
+schedule = "weekly"
+

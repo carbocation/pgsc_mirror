@@ -1,0 +1,10 @@
+.git
+.github
+mirror
+.pgsc-mirror
+*.linux
+*.db
+*.db-shm
+*.db-wal
+dist
+

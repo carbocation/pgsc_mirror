@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/pgsc-mirror/pgsc-mirror/docs/manifest.schema.json",
+  "title": "pgsc-mirror manifest entry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "release_id", "pgs_id", "genome_build", "source_url", "source_md5",
+    "size_bytes", "blob_key", "first_seen_at", "last_seen_at", "status"
+  ],
+  "properties": {
+    "release_id": {"type": "string", "pattern": "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$"},
+    "pgs_id": {"type": "string", "pattern": "^PGS[0-9]{6}$"},
+    "genome_build": {"const": "GRCh38"},
+    "source_url": {"type": "string", "format": "uri"},
+    "source_md5": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "size_bytes": {"type": "integer", "minimum": 0},
+    "blob_key": {"type": "string", "pattern": "^blobs/md5/[0-9a-f]{2}/[0-9a-f]{32}\\.txt\\.gz$"},
+    "upstream_etag": {"type": "string"},
+    "upstream_last_modified": {"type": "string"},
+    "first_seen_at": {"type": "string", "format": "date-time"},
+    "last_seen_at": {"type": "string", "format": "date-time"},
+    "status": {"enum": ["available", "withdrawn"]},
+    "license": {"type": "string"},
+    "gcs_generation": {"type": "integer", "minimum": 0}
+  }
+}
+
