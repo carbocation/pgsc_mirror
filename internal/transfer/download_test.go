@@ -123,6 +123,48 @@ func TestDownloadChecksumMismatch(t *testing.T) {
 	}
 }
 
+func TestDownloadBoundedRejectsAdvertisedSize(t *testing.T) {
+	body := []byte("too large")
+	var bodyWrites atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprint(len(body)))
+		bodyWrites.Add(1)
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+	part := filepath.Join(t.TempDir(), "bounded.part")
+	_, err := testClient().DownloadBounded(context.Background(), []string{srv.URL}, part, checksum(body), int64(len(body)-1))
+	if !errors.Is(err, ErrSizeLimit) {
+		t.Fatalf("got %v, want size-limit error", err)
+	}
+	if _, statErr := os.Stat(part); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("oversized partial was retained: %v", statErr)
+	}
+	if bodyWrites.Load() != 1 {
+		t.Fatalf("unexpected request count %d", bodyWrites.Load())
+	}
+}
+
+func TestDownloadBoundedEnforcesLimitWithoutContentLength(t *testing.T) {
+	body := []byte("a chunked response beyond the limit")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+	part := filepath.Join(t.TempDir(), "bounded.part")
+	_, err := testClient().DownloadBounded(context.Background(), []string{srv.URL}, part, checksum(body), 8)
+	if !errors.Is(err, ErrSizeLimit) {
+		t.Fatalf("got %v, want size-limit error", err)
+	}
+	if _, statErr := os.Stat(part); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("oversized partial was retained: %v", statErr)
+	}
+}
+
 func TestRetryAfterAndPermanent404(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

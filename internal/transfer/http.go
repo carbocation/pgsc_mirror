@@ -39,13 +39,21 @@ func NewHTTPClient(timeout time.Duration, policy Policy, userAgent string) *HTTP
 func (c *HTTPClient) WithClient(client *http.Client) *HTTPClient { c.client = client; return c }
 
 func (c *HTTPClient) Do(ctx context.Context, urls []string, headers http.Header) (*http.Response, error) {
+	return c.DoMethod(ctx, http.MethodGet, urls, headers)
+}
+
+// DoMethod performs a retrying GET or HEAD request against ordered fallback URLs.
+func (c *HTTPClient) DoMethod(ctx context.Context, method string, urls []string, headers http.Header) (*http.Response, error) {
 	if len(urls) == 0 {
 		return nil, errors.New("no upstream URLs")
+	}
+	if method != http.MethodGet && method != http.MethodHead {
+		return nil, fmt.Errorf("unsupported HTTP method %q", method)
 	}
 	var last error
 	for attempt := 0; attempt < c.policy.Attempts; attempt++ {
 		u := urls[attempt%len(urls)]
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		req, err := http.NewRequestWithContext(ctx, method, u, nil)
 		if err != nil {
 			return nil, err
 		}

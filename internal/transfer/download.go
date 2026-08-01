@@ -16,7 +16,10 @@ import (
 	"time"
 )
 
-var ErrChecksumMismatch = errors.New("download checksum mismatch")
+var (
+	ErrChecksumMismatch = errors.New("download checksum mismatch")
+	ErrSizeLimit        = errors.New("download exceeds size limit")
+)
 
 type DownloadResult struct {
 	Path         string
@@ -36,6 +39,12 @@ type partialMeta struct {
 }
 
 func (c *HTTPClient) Download(ctx context.Context, urls []string, partPath, expectedMD5 string) (DownloadResult, error) {
+	return c.DownloadBounded(ctx, urls, partPath, expectedMD5, 0)
+}
+
+// DownloadBounded downloads and verifies an object while enforcing a maximum
+// total byte count. A non-positive maxBytes disables the limit.
+func (c *HTTPClient) DownloadBounded(ctx context.Context, urls []string, partPath, expectedMD5 string, maxBytes int64) (DownloadResult, error) {
 	if len(urls) == 0 {
 		return DownloadResult{}, errors.New("no download URLs")
 	}
@@ -53,6 +62,11 @@ func (c *HTTPClient) Download(ctx context.Context, urls []string, partPath, expe
 	var last error
 	for attempt := 0; attempt < c.policy.Attempts; attempt++ {
 		size := fileSize(partPath)
+		if maxBytes > 0 && size > maxBytes {
+			_ = os.Remove(partPath)
+			_ = os.Remove(metaPath)
+			return DownloadResult{}, fmt.Errorf("%w: partial file is %d bytes, limit is %d", ErrSizeLimit, size, maxBytes)
+		}
 		if size > 0 && meta.SourceURL == "" {
 			_ = os.Truncate(partPath, 0)
 			size = 0
@@ -104,7 +118,6 @@ func (c *HTTPClient) Download(ctx context.Context, urls []string, partPath, expe
 			resp.Body.Close()
 			return DownloadResult{}, fmt.Errorf("GET %s: %s", resp.Request.URL, resp.Status)
 		}
-
 		appendMode := size > 0 && resp.StatusCode == http.StatusPartialContent
 		if appendMode {
 			if !validContentRange(resp.Header.Get("Content-Range"), size) || changedValidator(meta, resp) {
@@ -125,6 +138,12 @@ func (c *HTTPClient) Download(ctx context.Context, urls []string, partPath, expe
 				return DownloadResult{}, err
 			}
 		}
+		if maxBytes > 0 && resp.ContentLength >= 0 && size+resp.ContentLength > maxBytes {
+			resp.Body.Close()
+			_ = os.Remove(partPath)
+			_ = os.Remove(metaPath)
+			return DownloadResult{}, fmt.Errorf("%w: advertised total is %d bytes, limit is %d", ErrSizeLimit, size+resp.ContentLength, maxBytes)
+		}
 		flags := os.O_CREATE | os.O_WRONLY
 		if appendMode {
 			flags |= os.O_APPEND
@@ -142,9 +161,24 @@ func (c *HTTPClient) Download(ctx context.Context, urls []string, partPath, expe
 			resp.Body.Close()
 			return DownloadResult{}, err
 		}
-		_, copyErr := io.Copy(f, resp.Body)
+		var copied int64
+		var copyErr error
+		if maxBytes > 0 {
+			remaining := maxBytes - size
+			copied, copyErr = io.Copy(f, io.LimitReader(resp.Body, remaining+1))
+			if copyErr == nil && copied > remaining {
+				copyErr = fmt.Errorf("%w: response exceeded %d bytes", ErrSizeLimit, maxBytes)
+			}
+		} else {
+			copied, copyErr = io.Copy(f, resp.Body)
+		}
 		closeErr := f.Close()
 		resp.Body.Close()
+		if errors.Is(copyErr, ErrSizeLimit) {
+			_ = os.Remove(partPath)
+			_ = os.Remove(metaPath)
+			return DownloadResult{}, copyErr
+		}
 		if copyErr != nil || closeErr != nil {
 			last = errors.Join(copyErr, closeErr)
 			if err := c.waitRetry(ctx, attempt, 0); err != nil {

@@ -7,9 +7,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -24,15 +27,27 @@ var (
 	buildDate = "unknown"
 )
 
-var commands = map[string]bool{"plan": true, "reconcile": true, "update": true, "pull": true, "verify": true, "status": true, "rebuild-state": true, "gc": true}
+var commands = map[string]bool{"probe": true, "plan": true, "reconcile": true, "update": true, "pull": true, "verify": true, "status": true, "rebuild-state": true, "gc": true}
+
+type stringList []string
+
+func (v *stringList) String() string { return strings.Join(*v, ",") }
+func (v *stringList) Set(value string) error {
+	*v = append(*v, value)
+	return nil
+}
 
 type options struct {
-	config string
-	json   bool
-	dryRun bool
-	full   bool
-	sample int
-	apply  bool
+	config   string
+	json     bool
+	dryRun   bool
+	full     bool
+	sample   int
+	apply    bool
+	pgsIDs   stringList
+	maxSize  string
+	gcsSmoke bool
+	report   string
 }
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
@@ -57,12 +72,24 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&o.full, "full", false, "verify every available blob")
 	fs.IntVar(&o.sample, "sample", 0, "number of blobs to verify when not using --full")
 	fs.BoolVar(&o.apply, "apply", false, "apply garbage collection (default is dry-run)")
+	fs.Var(&o.pgsIDs, "pgs-id", "PGS score ID to check (repeatable; probe only)")
+	fs.StringVar(&o.maxSize, "max-size", "100MiB", "maximum compressed scoring-file size (probe only)")
+	fs.BoolVar(&o.gcsSmoke, "gcs-smoke-test", false, "exercise conditional GCS object operations after upstream checks pass")
+	fs.StringVar(&o.report, "report", "", "write the probe JSON report to a file or directory")
 	if err := fs.Parse(flagArgs); err != nil {
 		return 2
 	}
 	if fs.NArg() != 0 {
 		fmt.Fprintln(stderr, "error: unexpected arguments:", strings.Join(fs.Args(), " "))
 		return 2
+	}
+	var maxBytes int64
+	if command == "probe" {
+		maxBytes, err = parseByteSize(o.maxSize)
+		if err != nil {
+			fmt.Fprintln(stderr, "error: --max-size:", err)
+			return 2
+		}
 	}
 	cfg, err := config.Load(o.config)
 	if err != nil {
@@ -80,6 +107,20 @@ func run(args []string, stdout, stderr io.Writer) int {
 	defer a.Close()
 	var result any
 	switch command {
+	case "probe":
+		var report app.ProbeReport
+		report, err = a.Probe(ctx, app.ProbeOptions{PGSIDs: []string(o.pgsIDs), MaxBytes: maxBytes, GCSSmoke: o.gcsSmoke})
+		if o.report != "" {
+			reportPath, pathErr := resolveReportPath(o.report, report.RunID)
+			if pathErr == nil {
+				report.ReportPath = reportPath
+				pathErr = writeJSONReport(reportPath, report)
+			}
+			if pathErr != nil {
+				err = errors.Join(err, fmt.Errorf("write probe report: %w", pathErr))
+			}
+		}
+		result = report
 	case "plan":
 		result, err = a.Plan(ctx)
 	case "reconcile":
@@ -127,11 +168,36 @@ func splitCommand(args []string) (string, []string, error) {
 
 func usage(w io.Writer) {
 	fmt.Fprintln(w, "usage: pgsc-mirror [global flags] <command> [flags]")
-	fmt.Fprintln(w, "commands: plan, reconcile, update, pull, verify, status, rebuild-state, gc, version")
+	fmt.Fprintln(w, "commands: probe, plan, reconcile, update, pull, verify, status, rebuild-state, gc, version")
 }
 
 func printHuman(w io.Writer, v any) {
 	switch r := v.(type) {
+	case app.ProbeReport:
+		fmt.Fprintf(w, "probe %s: %s (%d score checks, %d ms)\n", r.RunID, strings.ToUpper(r.Status), len(r.Scores), r.DurationMS)
+		for _, score := range r.Scores {
+			fmt.Fprintf(w, "%s\t%s", score.PGSID, score.Status)
+			if score.Status == "verified" {
+				fmt.Fprintf(w, "\t%d bytes\t%s\t%d attempt(s)", score.DownloadedSize, score.ObservedMD5, score.DownloadAttempts)
+			}
+			if score.Error != "" {
+				fmt.Fprintf(w, "\t%s", score.Error)
+			}
+			fmt.Fprintln(w)
+		}
+		if r.GCS != nil {
+			fmt.Fprintf(w, "GCS smoke test: %s", r.GCS.Status)
+			if r.GCS.Key != "" {
+				fmt.Fprintf(w, " (%s/%s)", r.GCS.Target, r.GCS.Key)
+			}
+			if r.GCS.Error != "" {
+				fmt.Fprintf(w, ": %s", r.GCS.Error)
+			}
+			fmt.Fprintln(w)
+		}
+		if r.ReportPath != "" {
+			fmt.Fprintln(w, "JSON report:", r.ReportPath)
+		}
 	case app.PlanReport:
 		fmt.Fprintf(w, "previous release: %s\nscore IDs inspected: %d of %d\n", valueOr(r.PreviousRelease, "none"), r.ScoreCount, r.TotalScoreCount)
 		if r.Truncated {
@@ -198,6 +264,91 @@ func printHuman(w io.Writer, v any) {
 		b, _ := json.MarshalIndent(v, "", "  ")
 		fmt.Fprintln(w, string(b))
 	}
+}
+
+func parseByteSize(raw string) (int64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, errors.New("value is empty")
+	}
+	upper := strings.ToUpper(raw)
+	multipliers := []struct {
+		suffix string
+		value  uint64
+	}{
+		{"GIB", 1 << 30}, {"MIB", 1 << 20}, {"KIB", 1 << 10},
+		{"GB", 1_000_000_000}, {"MB", 1_000_000}, {"KB", 1_000}, {"B", 1},
+	}
+	var number string
+	var multiplier uint64
+	for _, candidate := range multipliers {
+		if strings.HasSuffix(upper, candidate.suffix) {
+			number = strings.TrimSpace(raw[:len(raw)-len(candidate.suffix)])
+			multiplier = candidate.value
+			break
+		}
+	}
+	if multiplier == 0 {
+		number = raw
+		multiplier = 1
+	}
+	n, err := strconv.ParseUint(number, 10, 64)
+	if err != nil || n == 0 {
+		return 0, fmt.Errorf("invalid positive byte size %q", raw)
+	}
+	if n > uint64(math.MaxInt64)/multiplier {
+		return 0, fmt.Errorf("byte size %q overflows int64", raw)
+	}
+	return int64(n * multiplier), nil
+}
+
+func resolveReportPath(raw, runID string) (string, error) {
+	if runID == "" {
+		return "", errors.New("probe did not assign a run ID")
+	}
+	clean := filepath.Clean(raw)
+	if info, err := os.Stat(clean); err == nil {
+		if info.IsDir() {
+			return filepath.Join(clean, runID+".json"), nil
+		}
+		return clean, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	if strings.HasSuffix(raw, string(os.PathSeparator)) {
+		return filepath.Join(clean, runID+".json"), nil
+	}
+	return clean, nil
+}
+
+func writeJSONReport(path string, report app.ProbeReport) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".pgsc-probe-report-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return err
+	}
+	enc := json.NewEncoder(tmp)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(report); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 func valueOr(v, fallback string) string {

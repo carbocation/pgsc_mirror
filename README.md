@@ -56,6 +56,7 @@ All institution-specific paths, projects, buckets, prefixes, billing projects, c
 
 | Command | Behavior |
 |---|---|
+| `probe` | Checks only explicitly named IDs with HEAD, a streaming size cap, and compressed-byte MD5 verification; optionally runs a self-cleaning GCS conditional-write smoke test. |
 | `plan` | Read-only upstream inventory and proposed changes. |
 | `reconcile` | Full checksum-sidecar audit and repair. Detects in-place score revisions. |
 | `update` | Cheap conditional score-list/metadata check, then reconciliation only when a sentinel changes. |
@@ -66,6 +67,8 @@ All institution-specific paths, projects, buckets, prefixes, billing projects, c
 | `gc` | Conservative retention report. It is a dry run unless `--apply` is explicit. |
 
 Every command supports `--config`; reports support `--json`. Mutating commands support `--dry-run`. `gc` deliberately uses the separate `--apply` switch.
+
+`probe` is the bounded preflight command. Supply one or more repeatable `--pgs-id` flags and a positive `--max-size` such as `100MiB`. It fetches the score list once, never fetches the bulk metadata CSV, and removes every temporary scoring file after checking the compressed bytes. A known or streamed size above the cap, a missing ID, an incomplete response, or an MD5 mismatch makes the probe fail after it has reported all requested IDs. `--gcs-smoke-test` runs only after every upstream check succeeds; it creates, reads, conditionally replaces, tests a stale generation, and deletes one `probes/<run-id>.json` object. Use `--report` with a JSON filename or an existing directory.
 
 `update` cannot detect a scoring-file revision when neither sentinel changes. Schedule a periodic full `reconcile` independently (for example, weekly) in addition to more frequent `update` runs. Scheduling stays outside the binary: cron, systemd timers, Cloud Run Jobs, Kubernetes Jobs, and equivalent one-shot systems all work.
 
@@ -87,4 +90,3 @@ The race detector may use the platform C toolchain internally; production binari
 ## Releases
 
 GoReleaser configuration builds reproducible Linux, macOS, and Windows archives for amd64 and arm64, emits SHA-256 checksums, and generates archive SBOMs with Syft. The application itself is licensed under the permissive MIT License.
-

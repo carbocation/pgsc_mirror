@@ -38,6 +38,16 @@ type Document struct {
 	NotModified  bool
 }
 
+type ScoreObjectInfo struct {
+	URL           string
+	Size          int64
+	SizeKnown     bool
+	ETag          string
+	LastModified  string
+	HeadSupported bool
+	StatusCode    int
+}
+
 func New(baseURLs []string, scoreList, metadataCSV string, httpClient *transfer.HTTPClient) *Client {
 	return &Client{baseURLs: baseURLs, scoreList: scoreList, metadataCSV: metadataCSV, http: httpClient}
 }
@@ -136,6 +146,8 @@ func ScorePath(id, genomeBuild string) string {
 	return path.Join("scores", id, "ScoringFiles", "Harmonized", name)
 }
 
+func ValidScoreID(id string) bool { return idPattern.MatchString(id) }
+
 func (c *Client) fetch(ctx context.Context, rel, etag, modified string, max int64) (Document, error) {
 	headers := make(http.Header)
 	if etag != "" {
@@ -193,13 +205,47 @@ func (c *Client) Checksum(ctx context.Context, id, genomeBuild string) (string, 
 	rel := ScorePath(id, genomeBuild) + ".md5"
 	d, err := c.fetch(ctx, rel, "", "", 64<<10)
 	if err != nil {
-		return "", "", err
+		return "", strings.TrimSuffix(d.URL, ".md5"), err
 	}
 	sum, err := ParseMD5(bytes.NewReader(d.Body))
 	if err != nil {
 		return "", d.URL, err
 	}
 	return sum, strings.TrimSuffix(d.URL, ".md5"), nil
+}
+
+// InspectScore performs a HEAD request without reading the score body. Servers
+// that do not implement HEAD are reported with an unknown size so callers can
+// still rely on their streaming byte limit.
+func (c *Client) InspectScore(ctx context.Context, id, genomeBuild string) (ScoreObjectInfo, error) {
+	if !idPattern.MatchString(id) {
+		return ScoreObjectInfo{}, fmt.Errorf("invalid PGS ID %q", id)
+	}
+	resp, err := c.http.DoMethod(ctx, http.MethodHead, c.URLs(ScorePath(id, genomeBuild)), make(http.Header))
+	if err != nil {
+		return ScoreObjectInfo{}, err
+	}
+	defer resp.Body.Close()
+	info := ScoreObjectInfo{
+		URL:           resp.Request.URL.String(),
+		ETag:          resp.Header.Get("ETag"),
+		LastModified:  resp.Header.Get("Last-Modified"),
+		HeadSupported: true,
+		StatusCode:    resp.StatusCode,
+	}
+	switch resp.StatusCode {
+	case http.StatusOK:
+		if resp.ContentLength >= 0 {
+			info.Size = resp.ContentLength
+			info.SizeKnown = true
+		}
+		return info, nil
+	case http.StatusMethodNotAllowed, http.StatusNotImplemented:
+		info.HeadSupported = false
+		return info, nil
+	default:
+		return info, fmt.Errorf("HEAD %s: %s", info.URL, resp.Status)
+	}
 }
 
 func ValidateURL(raw string) error { _, err := url.ParseRequestURI(raw); return err }
