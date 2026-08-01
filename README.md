@@ -1,32 +1,84 @@
 # pgsc-mirror
 
-`pgsc-mirror` is a public, provider-neutral Go application for maintaining verified local and/or Google Cloud Storage mirrors of PGS Catalog scoring files harmonized to GRCh38. It preserves byte-identical upstream gzip files, publishes deterministic immutable release manifests, and advances a small `LATEST.json` pointer only after every expected object is present.
+`pgsc-mirror` maintains a verified local and/or Google Cloud Storage mirror of PGS Catalog scoring files harmonized to GRCh38. The mirrored gzip files remain byte-identical to upstream.
 
-This project is independent and is not affiliated with or endorsed by EMBL-EBI, the PGS Catalog, or its funders. The repository's MIT license applies to the `pgsc-mirror` software, not to PGS Catalog data. PGS Catalog score licenses vary; the mirror records their license metadata but does not replace upstream terms. Operators and downstream users remain responsible for complying with those terms.
+## Quick start
 
-## Safety model
+Start with the example configuration:
 
-The preservation-critical layout is:
-
-```text
-blobs/md5/{prefix}/{md5}.txt.gz
-releases/{release_id}/manifest.jsonl.gz
-releases/{release_id}/metadata/pgs_scores_list.txt
-releases/{release_id}/metadata/pgs_all_metadata_scores.csv
-LATEST.json
+```bash
+cp config.example.toml config.toml
 ```
 
-Blobs, metadata snapshots, and manifests are immutable. `LATEST.json` is the only mutable publication object. A reconciliation takes a renewable provider-backed lease, verifies the MD5 of each compressed scoring file, uploads all missing blobs with create-only preconditions, writes the release snapshot and manifest, and finally advances `LATEST.json` with compare-and-swap. Any failed expected object leaves the prior release current. If a multi-target run stops after the authoritative pointer advances, the next reconciliation repairs lagging targets before reporting the mirror current.
+Edit `config.toml` to select a local mirror, GCS mirror, or both. For real synchronization, make sure `transfer.sidecar_limit = 0`.
 
-Every new or revised verified scoring file is also inspected through its gzip stream before publication. The per-score manifest entry records the observed format version, delimiter, exact ordered columns, metadata-field names, section headings, a stable schema fingerprint, and a human-readable header type. Inspection stops at the table header and is bounded to 2 MiB or 10,000 decompressed header lines. A checksum-valid upstream anomaly is preserved byte-for-byte and marked `unrecognized` or `unreadable`; it does not get silently normalized or dropped. Unchanged blobs reuse their versioned observation. A full `reconcile` backfills entries from an older manifest that has no current header observation by reading only the stored blobs' headers and publishing a new immutable release. `LATEST.json` records the completed inspector version, allowing `update` to trigger this one-time backfill from its small pointer without downloading the manifest on every unchanged check.
+### Perform the first synchronization and exit
 
-SQLite is only a disposable operational index. It uses foreign keys, WAL, a busy timeout, and serialized writes; it is never intended for GCS FUSE. Successful checksum sidecars are checkpointed there during an interrupted inventory, while verified scoring-file partials remain in the configured work directory until every target has stored them. Both are reused after restart. `rebuild-state` reconstructs SQLite from immutable manifests, and ordinary reconciliation automatically catches the index up if publication completed before an abrupt shutdown.
+```bash
+./pgsc-mirror.linux --config config.toml reconcile
+```
 
-For a GCS-only mirror, scoring files are never cloned wholesale to local disk. Each file worker downloads one compressed file into `state.work_dir`, verifies it, uploads it directly from that durable file, and removes it before taking more work. `transfer.file_concurrency` bounds the number of retained current partials and `transfer.max_file_size` is enforced both from `Content-Length` and while streaming. On restart, current partials are handled first; obsolete checksum revisions and excess older partials are pruned. With the example defaults, scoring-file scratch is therefore bounded to roughly two 10-GiB files, plus small operational files and at most one metadata/upload staging object. Enabling `targets.local` is different by design: `local.root` then contains a complete persistent mirror and must be sized accordingly.
+This downloads and verifies the current scores, publishes a complete mirror release, and exits. If it is interrupted, run the same command again.
+
+### Keep the mirror updated continuously
+
+```bash
+./pgsc-mirror.linux --config config.toml
+```
+
+This is the normal long-lived mode. It catches up immediately, then keeps checking and maintaining the mirror until stopped. A separate first synchronization is optional: the long-lived command initializes an empty mirror itself.
+
+You can stop it with `Ctrl+C`, reboot the machine, or leave it down for several days. Starting the same command again resumes durable partial work where possible and catches up safely. Keep `state.path` and `state.work_dir` on persistent disk to retain that progress.
+
+By default, the running process:
+
+- Checks for upstream changes every 6 hours.
+- Performs a complete reconciliation every 7 days.
+- Verifies a deterministic sample every 24 hours.
+- Retries failed maintenance after 5 minutes without exiting.
+
+These defaults can be changed in TOML:
+
+```toml
+[service]
+update_interval = "6h"
+reconcile_interval = "168h"
+verify_interval = "24h"
+error_backoff = "5m"
+```
+
+## Configuration
+
+See [`config.example.toml`](config.example.toml) for a complete configuration. The principal deployment settings are:
+
+- `[targets]`, `[local]`, and `[gcs]`: where the mirror is stored.
+- `[identity]`: the operator identity sent to the upstream service.
+- `[transfer]`: concurrency, retry, scratch-size, and lease limits.
+- `[state]`: the SQLite operational index and durable download workspace.
+- `[service]`: the long-running maintenance schedule.
+
+No credentials belong in TOML. GCS uses Application Default Credentials. All institution-specific paths, buckets, prefixes, projects, contacts, and identities are configurable rather than compiled into the program.
+
+## Common commands
+
+| Command | Behavior |
+|---|---|
+| no command, or `run` | Continuously catches up and maintains the mirror until stopped. |
+| `reconcile` | Performs a complete checksum audit and repair, then exits. |
+| `status` | Reports mirror pointers, score counts, withdrawals, and recent run status. |
+| `verify` | Verifies a deterministic sample; add `--full` to verify every blob. |
+| `plan` | Reads the upstream inventory and reports proposed changes without publishing. |
+| `update` | Performs one lightweight change check and reconciles if needed. |
+| `pull` | Makes a local target match the completed release currently published in GCS. |
+| `rebuild-state` | Reconstructs SQLite from immutable release manifests. |
+| `gc` | Reports conservative retention candidates; deletion requires `--apply`. |
+| `probe` | Checks only explicitly named scores and can exercise GCS conditional writes. |
+
+Every command accepts `--config`. Reports accept `--json`. The explicit long-lived form is `pgsc-mirror --config config.toml run`.
 
 ## Build
 
-Go 1.25 or newer is required. The release binary is static and never uses CGo:
+Go 1.25 or newer is required. The release binary is static and does not use CGo:
 
 ```bash
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
@@ -34,83 +86,32 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
   -o pgsc-mirror.linux ./cmd/pgsc-mirror
 ```
 
-`make linux` produces the same `.linux`-suffixed artifact. The provided multi-stage `Dockerfile` produces a non-root minimal image with CA certificates.
+`make linux` produces the same `.linux` artifact. The multi-stage `Dockerfile` produces a non-root minimal image with CA certificates.
 
-## Configure
+## Design and data integrity
 
-Copy [`config.example.toml`](config.example.toml), change the target and operator settings, and start the binary. No credentials belong in the file. GCS uses Application Default Credentials.
+Published releases are immutable and become current only after every expected object is present, so an interruption cannot expose a partial release. Scoring files are verified over their compressed bytes and preserved without normalization. New and revised files also receive a bounded header inspection whose descriptive schema observation is stored in the manifest.
 
-```bash
-cp config.example.toml config.toml
-./pgsc-mirror.linux --config config.toml
-```
+The object layout, atomic publication process, restart behavior, bounded scratch model, and header inspection rules are documented in [`docs/design.md`](docs/design.md).
 
-That is the normal operating interface. The process synchronizes immediately, keeps the mirror current while it is running, and retries transient failures without exiting. `Ctrl+C`, a reboot, or several days of downtime is safe: start the same command again and it resumes durable partial work where possible, checks what changed, and catches up. Published releases are atomic, so interruption cannot make an incomplete release current.
+Institution-specific transformations and derived near-copies should live outside this preservation mirror. [`docs/derived-workflows.md`](docs/derived-workflows.md) describes the immutable release contract that downstream jobs can consume.
 
-The default maintenance schedule is a lightweight upstream change check every six hours, a complete reconciliation every seven days, and verification of a deterministic sample every day. These intervals live under `[service]` in TOML. A full reconciliation at first startup—or when overdue after downtime—also repairs local operational state from the published mirror.
-
-Important settings include:
-
-- `upstream.base_urls`: ordered HTTPS/HTTP sources. Requests fall back across this list with bounded exponential backoff, jitter, and `Retry-After` support. Version 1 accepts HTTP(S) URLs; the configured HTTP endpoint is the fallback for intermittent HTTPS issues.
-- `identity.user_agent` and `identity.contact`: identify the operator responsibly to the public upstream.
-- `transfer.concurrency`: bounded checksum-sidecar concurrency; the default is four.
-- `transfer.file_concurrency`: concurrent scoring-file download/upload pipelines; the default is two.
-- `transfer.max_file_size`: hard compressed-file scratch limit per pipeline. An oversized or misleading response fails reconciliation without advancing the release.
-- `transfer.lease_duration`: takeover delay after a hard stop. The lease is renewed during active work, so this can stay short without limiting run duration.
-- `transfer.sidecar_limit`: a development-only plan cap. Mutating commands refuse to publish if it would truncate the upstream inventory.
-- `targets.local` / `targets.gcs`: enable either or both stores. With both enabled, GCS is authoritative and its pointer advances first.
-- `state.work_dir`: durable local scratch for resumable scoring downloads and provider upload staging. Keep it on persistent disk; it defaults beside `state.path`.
-- `state.checkpoint_max_age`: maximum age for resuming an interrupted checksum inventory. A completed reconciliation consumes its checkpoint, so the next full audit still refetches every sidecar.
-- `retention.missing_grace`: withdrawn IDs and unreferenced data remain protected until this period expires.
-- `service.update_interval`: how often the running process performs a lightweight upstream change check.
-- `service.reconcile_interval`: how often it performs a complete checksum-sidecar audit, including after downtime.
-- `service.verify_interval`: how often it samples the completed mirror for verification.
-- `service.error_backoff`: how long it waits before retrying a failed maintenance operation.
-
-All institution-specific paths, projects, buckets, prefixes, billing projects, contacts, and identities live in TOML configuration.
-
-## Commands
-
-| Command | Behavior |
-|---|---|
-| `run` | Default when no command is supplied. Continuously catches up and maintains the mirror until stopped. |
-| `probe` | Checks only explicitly named IDs with HEAD, a streaming size cap, and compressed-byte MD5 verification; optionally runs a self-cleaning GCS conditional-write smoke test. |
-| `plan` | Read-only upstream inventory and proposed changes. |
-| `reconcile` | Full checksum-sidecar audit and repair. Detects in-place score revisions. |
-| `update` | Cheap conditional score-list/metadata check, then reconciliation only when a sentinel changes. |
-| `pull` | Pins the local target to the completed release currently published in GCS. |
-| `verify` | Verifies manifest SHA-256 and a deterministic sample of blob size/MD5; use `--full` for all blobs. |
-| `status` | Reports target pointers, score counts, withdrawals, failed runs, and the last operational run. |
-| `rebuild-state` | Reconstructs SQLite exclusively from immutable release manifests. |
-| `gc` | Conservative retention report. It is a dry run unless `--apply` is explicit. |
-
-Every command supports `--config`; reports support `--json`. Mutating one-shot commands support `--dry-run`. `gc` deliberately uses the separate `--apply` switch. The explicit form `pgsc-mirror --config config.toml run` is equivalent to omitting `run`.
-
-`probe` is the bounded preflight command. Supply one or more repeatable `--pgs-id` flags and a positive `--max-size` such as `100MiB`. It fetches the score list once, never fetches the bulk metadata CSV, and removes every temporary scoring file after checking the compressed bytes. A known or streamed size above the cap, a missing ID, an incomplete response, or an MD5 mismatch makes the probe fail after it has reported all requested IDs. `--gcs-smoke-test` runs only after every upstream check succeeds; it creates, reads, conditionally replaces, tests a stale generation, and deletes one `probes/<run-id>.json` object. Use `--report` with a JSON filename or an existing directory.
-
-The continuous mode combines lightweight `update`, periodic full `reconcile`, and periodic `verify` operations. The individual commands remain available for diagnostics, manually initiated work, and external one-shot schedulers, but they are not required for a normal long-lived installation.
-
-## Derived workflows and private extensions
-
-The preservation mirror ends at byte-identical upstream files and descriptive metadata. Institution-specific transformations and near-copies should live in a separate repository, use a separate configuration and object namespace, and never replace objects under `blobs/` or releases published by this tool.
-
-[`docs/derived-workflows.md`](docs/derived-workflows.md) describes the immutable release contract intended for one-off analyses and continuously maintained derivative products. Private jobs can checkpoint by source MD5 and inspector version, process only new or revised entries, and independently publish their own atomic release pointer. No private paths, coordinate conventions, or execution hooks are compiled into `pgsc-mirror`.
-
-## Withdrawals and garbage collection
-
-An ID absent from the current score list is marked `withdrawn`, never immediately deleted. Old manifests and content remain immutable and readable. `gc` protects the current release, the configured number of recent releases, all releases inside the grace period, and every blob referenced by any protected release. Review its output before using `--apply`.
+Withdrawn IDs are recorded rather than immediately deleted. `gc` protects the current release, recent releases, releases inside the configured grace period, and every blob they reference.
 
 ## Development and tests
 
-The default test suite uses only tiny `httptest` gzip fixtures; it never contacts PGS Catalog or GCS. It covers parsing, deterministic manifests, additions, in-place revisions, withdrawals, restorations, checksum failures, interrupted/resumed transfers, reuse of verified downloads after upload failure, inventory checkpoints, renewable leases, cross-target pointer recovery, provider staging cleanup, retry behavior, local conditional updates, and SQLite loss/reconstruction.
+The normal test suite uses tiny synthetic fixtures and does not contact PGS Catalog or GCS:
 
 ```bash
 go test ./...
 go test -race ./...
+go vet ./...
 ```
 
-The race detector may use the platform C toolchain internally; production binaries and application dependencies remain CGo-free. Optional GCS integration tests run only when `PGSC_MIRROR_GCS_TEST_BUCKET` is set. During initial development no complete PGS Catalog inventory or production mirror run is performed.
+Optional GCS integration tests run only when `PGSC_MIRROR_GCS_TEST_BUCKET` is set.
 
-## Releases
+## License and data terms
 
-GoReleaser configuration builds reproducible Linux, macOS, and Windows archives for amd64 and arm64, emits SHA-256 checksums, and generates archive SBOMs with Syft. The application itself is licensed under the permissive MIT License.
+The software is available under the MIT License. PGS Catalog score licenses vary; the mirror records their license metadata but does not replace upstream terms. Operators and downstream users remain responsible for complying with those terms.
+
+This project is independent and is not affiliated with or endorsed by EMBL-EBI, the PGS Catalog, or its funders.
