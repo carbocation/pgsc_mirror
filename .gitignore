@@ -1,6 +1,8 @@
 # Build artifacts
 /pgsc-mirror
 *.linux
+*.darwin
+*.exe
 dist/
 
 # Operational state and local mirror data
