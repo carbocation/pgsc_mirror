@@ -32,6 +32,14 @@ Successful checksum-sidecar requests are checkpointed during an interrupted inve
 
 The continuous service records successful complete reconciliations and verifications in SQLite. On startup it performs an immediate catch-up and runs either task immediately when its configured interval became overdue during downtime.
 
+## Multiple processes and writer coordination
+
+When GCS is enabled it is the authoritative target and is ordered first. Reconciliation acquires `leases/reconcile.json` under the configured GCS prefix with a does-not-exist precondition. The holder renews that object with generation-match writes and deletes the current generation when finished. A contender does not enter reconciliation while an unexpired lease is present.
+
+The lease coordinates publication work, not the complete lifetime of the service. Separate processes retain separate SQLite scheduling history and can both perform read-only sentinel checks and verification. After the lease holder finishes, a contender with stale local state may acquire the lease and repeat an otherwise unnecessary upstream audit. For this reason, multiple active services sharing a mirror are publication-safe but are not the recommended high-availability arrangement. Use one active service and a stopped standby when avoiding duplicate upstream traffic matters.
+
+After a hard failure, a contender can conditionally remove an expired lease generation and acquire a new lease. If a former holder attempts to renew a stale generation, renewal fails and its reconciliation context is canceled. Immutable create-only objects and compare-and-swap updates to `LATEST.json` remain the final publication safeguards.
+
 ## Bounded local scratch
 
 For a GCS-only mirror, scoring files are not retained wholesale on local disk. Each worker downloads one compressed file into `state.work_dir`, verifies it, uploads it from that durable file, and removes it before taking more work.

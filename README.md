@@ -47,6 +47,28 @@ verify_interval = "24h"
 error_backoff = "5m"
 ```
 
+## What must be kept locally?
+
+If GCS is enabled, no local runtime file is required to preserve the published mirror. The canonical data is the object set under the configured GCS bucket and prefix.
+
+| Local item | What happens if it is lost? |
+|---|---|
+| `config.toml` | The mirror remains valid, but recreating the exact bucket, prefix, paths, and operating policy becomes harder. Back this file up. It contains no credentials. |
+| `state.path` | Run history, maintenance timestamps, and transfer checkpoints are lost. The next start performs extra reconciliation and rebuilds operational state from the published mirror. |
+| `state.work_dir` | Incomplete downloads and staging files are lost and must be transferred again. Published objects are unaffected. |
+| Binary and logs | They can be replaced or rebuilt and are not part of the mirror. |
+| `local.root` | Critical when this is a local-only mirror. When GCS is also enabled, it is a replaceable local copy and GCS is authoritative. |
+
+Therefore, for a GCS-backed mirror, back up the TOML for operational reproducibility and protect the GCS objects themselves. Keeping `state.path` and `state.work_dir` on persistent disk avoids wasted work but is not required to preserve already published data.
+
+## Running more than one copy
+
+Two processes pointed at the exact same GCS bucket **and prefix** will not intentionally reconcile or publish at the same time. Reconciliation uses a renewable conditional-write lease stored in GCS. One process acquires it; the other reports that the lease is held and, in long-running mode, retries later. Immutable object writes and compare-and-swap publication provide additional protection.
+
+This is safe for publication correctness, but two permanently active processes are wasteful. Each machine has its own SQLite schedule, so both still perform read-only update checks and verification, and the second process may repeat a full upstream audit after the first releases the lease. That creates unnecessary upstream traffic.
+
+The recommended arrangement is one active long-running process and, if desired, a second installed but stopped standby. After a graceful shutdown the lease is released immediately. After a hard failure, the standby can take over when the renewable lease expires; the example configuration uses 15 minutes.
+
 ## Configuration
 
 See [`config.example.toml`](config.example.toml) for a complete configuration. The principal deployment settings are:
