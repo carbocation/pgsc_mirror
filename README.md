@@ -34,7 +34,6 @@ By default, the running process:
 
 - Checks for upstream changes every 6 hours.
 - Performs a complete reconciliation every 7 days.
-- Verifies a deterministic sample every 24 hours.
 - Retries failed maintenance after 5 minutes without exiting.
 
 These defaults can be changed in TOML:
@@ -43,9 +42,10 @@ These defaults can be changed in TOML:
 [service]
 update_interval = "6h"
 reconcile_interval = "168h"
-verify_interval = "24h"
 error_backoff = "5m"
 ```
+
+Early `verify_interval` and `[verify]` settings are accepted but ignored so existing configurations continue to start.
 
 ## What must be kept locally?
 
@@ -65,7 +65,7 @@ Therefore, for a GCS-backed mirror, back up the TOML for operational reproducibi
 
 Two processes pointed at the exact same GCS bucket **and prefix** will not intentionally reconcile or publish at the same time. Reconciliation uses a renewable conditional-write lease stored in GCS. One process acquires it; the other reports that the lease is held and, in long-running mode, retries later. Immutable object writes and compare-and-swap publication provide additional protection.
 
-This is safe for publication correctness, but two permanently active processes are wasteful. Both still perform read-only update checks and verification. Full-audit scheduling is shared through the mirror's maintenance checkpoint: after one process completes an audit, a contender adopts the newer checkpoint instead of repeating the checksum-sidecar sweep.
+This is safe for publication correctness, but two permanently active processes are wasteful. Both still perform read-only update checks. Full-audit scheduling is shared through the mirror's maintenance checkpoint: after one process completes an audit, a contender adopts the newer checkpoint instead of repeating the checksum-sidecar sweep.
 
 The recommended arrangement is one active long-running process and, if desired, a second installed but stopped standby. After a graceful shutdown the lease is released immediately. After a hard failure, the standby can take over when the renewable lease expires; the example configuration uses 15 minutes.
 
@@ -88,7 +88,7 @@ No credentials belong in TOML. GCS uses Application Default Credentials. All ins
 | no command, or `run` | Continuously catches up and maintains the mirror until stopped. |
 | `reconcile` | Performs a complete checksum audit and repair, then exits. |
 | `status` | Reports mirror pointers, score counts, withdrawals, and recent run status. |
-| `verify` | Verifies a deterministic sample; add `--full` to verify every blob. |
+| `verify` | Performs an operator-requested full integrity audit; `--sample N` deliberately limits it to `N` evenly distributed scoring objects. |
 | `plan` | Reads the upstream inventory and reports proposed changes without publishing. |
 | `update` | Performs one lightweight change check and reconciles if needed. |
 | `annotate` | Refreshes versioned descriptive metadata from already mirrored objects, without contacting PGS Catalog. |

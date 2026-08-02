@@ -37,6 +37,8 @@ update_interval = "3h"
 reconcile_interval = "72h"
 verify_interval = "12h"
 error_backoff = "4m"
+[verify]
+default_sample = 100
 `
 	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
@@ -63,8 +65,11 @@ error_backoff = "4m"
 	if !strings.Contains(c.Identity.UserAgent, "ops@example.org") {
 		t.Fatalf("contact missing from %q", c.Identity.UserAgent)
 	}
-	if c.Service.UpdateInterval.Duration != 3*time.Hour || c.Service.ReconcileInterval.Duration != 72*time.Hour || c.Service.VerifyInterval.Duration != 12*time.Hour || c.Service.ErrorBackoff.Duration != 4*time.Minute {
+	if c.Service.UpdateInterval.Duration != 3*time.Hour || c.Service.ReconcileInterval.Duration != 72*time.Hour || c.Service.ErrorBackoff.Duration != 4*time.Minute {
 		t.Fatalf("service schedule was not loaded: %+v", c.Service)
+	}
+	if c.Service.VerifyInterval.Duration != 12*time.Hour || c.Verify.DefaultSample != 100 {
+		t.Fatalf("legacy verification settings were not accepted: service=%+v verify=%+v", c.Service, c.Verify)
 	}
 }
 

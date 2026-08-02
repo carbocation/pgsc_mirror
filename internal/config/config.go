@@ -66,10 +66,12 @@ type Config struct {
 	Local       Local     `toml:"local"`
 	GCS         GCS       `toml:"gcs"`
 	Retention   Retention `toml:"retention"`
-	Verify      Verify    `toml:"verify"`
-	Service     Service   `toml:"service"`
-	Identity    Identity  `toml:"identity"`
-	State       State     `toml:"state"`
+	// Verify is retained only so early configuration files continue to load.
+	// Explicit verification no longer has configuration or service scheduling.
+	Verify   Verify   `toml:"verify"`
+	Service  Service  `toml:"service"`
+	Identity Identity `toml:"identity"`
+	State    State    `toml:"state"`
 }
 
 type Upstream struct {
@@ -111,17 +113,18 @@ type Retention struct {
 }
 
 type Verify struct {
+	// Deprecated: accepted but ignored.
 	DefaultSample int `toml:"default_sample"`
-	// Schedule is accepted for compatibility with early configuration files.
-	// Long-running scheduling is controlled by Service.
+	// Deprecated: accepted but ignored.
 	Schedule string `toml:"schedule"`
 }
 
 type Service struct {
 	UpdateInterval    Duration `toml:"update_interval"`
 	ReconcileInterval Duration `toml:"reconcile_interval"`
-	VerifyInterval    Duration `toml:"verify_interval"`
-	ErrorBackoff      Duration `toml:"error_backoff"`
+	// Deprecated: accepted but ignored.
+	VerifyInterval Duration `toml:"verify_interval"`
+	ErrorBackoff   Duration `toml:"error_backoff"`
 }
 
 type Identity struct {
@@ -156,11 +159,9 @@ func Defaults() Config {
 		Targets:   Targets{Local: true},
 		Local:     Local{Root: "./mirror"},
 		Retention: Retention{MissingGrace: Duration{30 * 24 * time.Hour}, KeepReleases: 10},
-		Verify:    Verify{DefaultSample: 100},
 		Service: Service{
 			UpdateInterval:    Duration{6 * time.Hour},
 			ReconcileInterval: Duration{7 * 24 * time.Hour},
-			VerifyInterval:    Duration{24 * time.Hour},
 			ErrorBackoff:      Duration{5 * time.Minute},
 		},
 		Identity: Identity{UserAgent: "pgsc-mirror/dev"},
@@ -268,7 +269,7 @@ func (c Config) Validate() error {
 	if c.Retention.KeepReleases < 1 || c.Retention.MissingGrace.Duration < 0 {
 		return errors.New("retention.keep_releases must be positive and missing_grace must not be negative")
 	}
-	if c.Service.UpdateInterval.Duration <= 0 || c.Service.ReconcileInterval.Duration <= 0 || c.Service.VerifyInterval.Duration <= 0 || c.Service.ErrorBackoff.Duration <= 0 {
+	if c.Service.UpdateInterval.Duration <= 0 || c.Service.ReconcileInterval.Duration <= 0 || c.Service.ErrorBackoff.Duration <= 0 {
 		return errors.New("service intervals and error_backoff must be positive")
 	}
 	return nil

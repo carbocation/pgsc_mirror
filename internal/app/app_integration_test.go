@@ -219,7 +219,7 @@ func TestReconcileLifecycleAndRecovery(t *testing.T) {
 		t.Fatalf("unexpected initial report %+v", r)
 	}
 	initial := r.ReleaseID
-	v, err := a.Verify(ctx, true, 0)
+	v, err := a.Verify(ctx, 0)
 	if err != nil {
 		t.Fatalf("verify: %v (%+v)", err, v)
 	}
@@ -339,7 +339,7 @@ func TestReconcileLifecycleAndRecovery(t *testing.T) {
 	if r, err = a.Reconcile(ctx, false); err != nil || !r.Changed {
 		t.Fatalf("retry after publication crash: report=%+v err=%v", r, err)
 	}
-	if _, err := a.Verify(ctx, true, 0); err != nil {
+	if _, err := a.Verify(ctx, 0); err != nil {
 		t.Fatal(err)
 	}
 

@@ -19,7 +19,9 @@ import (
 	"github.com/carbocation/pgsc_mirror/internal/store"
 )
 
-func (a *App) Verify(ctx context.Context, full bool, sample int) (VerifyReport, error) {
+// Verify performs an operator-requested integrity audit. A zero sample checks
+// every scoring object; a positive sample deliberately limits the audit.
+func (a *App) Verify(ctx context.Context, sample int) (VerifyReport, error) {
 	var report VerifyReport
 	var failed bool
 	for _, t := range a.targets {
@@ -53,13 +55,10 @@ func (a *App) Verify(ctx context.Context, full bool, sample int) (VerifyReport, 
 				active = append(active, e)
 			}
 		}
-		if !full {
-			if sample <= 0 {
-				sample = a.Config.Verify.DefaultSample
-			}
-			if sample < len(active) {
-				active = active[:sample]
-			}
+		result.Available = len(active)
+		if sample > 0 && sample < len(active) {
+			active = evenlySpacedSample(active, sample)
+			result.Sampled = true
 		}
 		for _, e := range active {
 			result.Checked++
@@ -74,6 +73,17 @@ func (a *App) Verify(ctx context.Context, full bool, sample int) (VerifyReport, 
 		return report, errors.New("verification failed")
 	}
 	return report, nil
+}
+
+func evenlySpacedSample(entries []model.Entry, count int) []model.Entry {
+	if count <= 0 || count >= len(entries) {
+		return entries
+	}
+	sample := make([]model.Entry, count)
+	for i := range sample {
+		sample[i] = entries[i*len(entries)/count]
+	}
+	return sample
 }
 
 func verifySnapshot(ctx context.Context, st store.Store, key, expected string) error {

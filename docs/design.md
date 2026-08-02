@@ -40,13 +40,13 @@ Successful checksum-sidecar requests are checkpointed during an interrupted inve
 
 `rebuild-state` reconstructs SQLite from immutable manifests. Ordinary reconciliation also catches the index up if publication completed before an abrupt shutdown. If the operational state is lost entirely, the mirror remains valid; rebuilding or reconciling may repeat work but does not require trusting an incomplete release.
 
-The continuous service records successful complete reconciliations and verifications in SQLite. On startup it performs an immediate catch-up and runs either task immediately when its configured interval became overdue during downtime.
+The continuous service records successful complete reconciliations in SQLite. On startup it performs an immediate catch-up and runs a full reconciliation when its configured interval became overdue during downtime. Blob verification is an explicit diagnostic operation, not scheduled maintenance: ingestion already validates the upstream MD5, GCS uploads include a server-validated CRC32C, and routine reads would duplicate the storage provider's integrity work.
 
 ## Multiple processes and writer coordination
 
 When GCS is enabled it is the authoritative target and is ordered first. Reconciliation acquires `leases/reconcile.json` under the configured GCS prefix with a does-not-exist precondition. The holder renews that object with generation-match writes and deletes the current generation when finished. A contender does not enter reconciliation while an unexpired lease is present.
 
-The lease coordinates publication work, not the complete lifetime of the service. Separate processes can both perform read-only sentinel checks and verification. Full-audit scheduling, however, is portable: a contender rereads the shared maintenance checkpoint before scheduled work and adopts a newer completed audit instead of repeating it after the lease holder finishes. Multiple active services are therefore publication-safe and sidecar-audit-aware, but still waste lightweight checks and verification. One active service and a stopped standby remain the recommended arrangement.
+The lease coordinates publication work, not the complete lifetime of the service. Separate processes can both perform read-only sentinel checks. Full-audit scheduling, however, is portable: a contender rereads the shared maintenance checkpoint before scheduled work and adopts a newer completed audit instead of repeating it after the lease holder finishes. Multiple active services are therefore publication-safe and sidecar-audit-aware, but still waste lightweight checks. One active service and a stopped standby remain the recommended arrangement.
 
 After a hard failure, a contender can conditionally remove an expired lease generation and acquire a new lease. If a former holder attempts to renew a stale generation, renewal fails and its reconciliation context is canceled. Immutable create-only objects and compare-and-swap updates to `LATEST.json` remain the final publication safeguards.
 

@@ -67,6 +67,8 @@ type VerifyTarget struct {
 	Target    string   `json:"target"`
 	ReleaseID string   `json:"release_id"`
 	Checked   int      `json:"checked"`
+	Available int      `json:"available"`
+	Sampled   bool     `json:"sampled"`
 	Failures  []string `json:"failures,omitempty"`
 }
 

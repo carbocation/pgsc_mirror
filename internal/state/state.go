@@ -238,31 +238,6 @@ SELECT completed_at FROM maintenance WHERE name='full_reconciliation'`)
 	return latest, !latest.IsZero(), nil
 }
 
-// LastSuccessfulVerification returns the completion time of the latest
-// successful verification performed by the continuous service.
-func (d *DB) LastSuccessfulVerification(ctx context.Context) (time.Time, bool, error) {
-	return d.lastSuccessfulRun(ctx, "command='verify'")
-}
-
-func (d *DB) lastSuccessfulRun(ctx context.Context, commandPredicate string) (time.Time, bool, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	var finished string
-	query := `SELECT finished_at FROM runs WHERE ` + commandPredicate + ` AND status='success' AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1`
-	err := d.db.QueryRowContext(ctx, query).Scan(&finished)
-	if err == sql.ErrNoRows {
-		return time.Time{}, false, nil
-	}
-	if err != nil {
-		return time.Time{}, false, err
-	}
-	stamp, err := time.Parse(time.RFC3339Nano, finished)
-	if err != nil {
-		return time.Time{}, false, fmt.Errorf("parse last successful run time: %w", err)
-	}
-	return stamp, true, nil
-}
-
 func (d *DB) RecordTransfer(ctx context.Context, pgsID, sourceMD5, partPath string, bytesDownloaded int64, attempts int, status string, transferErr error) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()

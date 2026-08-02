@@ -60,12 +60,8 @@ keep_releases = 10
 
 [service]
 # The normal binary mode runs continuously. It checks inexpensive upstream
-# sentinels every six hours, does a complete audit weekly, verifies a sample
-# daily, and keeps retrying after transient failures.
+# sentinels every six hours, does a complete audit weekly, and keeps retrying
+# after transient failures.
 update_interval = "6h"
 reconcile_interval = "168h" # 7 days
-verify_interval = "24h"
 error_backoff = "5m"
-
-[verify]
-default_sample = 100

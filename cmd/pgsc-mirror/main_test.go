@@ -103,6 +103,29 @@ func TestServiceReporterJSONLines(t *testing.T) {
 	}
 }
 
+func TestPrintHumanLabelsExplicitVerificationScope(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		sampled bool
+		want    string
+	}{
+		{name: "full", want: "checked 6972/6972 scoring objects (full audit)"},
+		{name: "sample", sampled: true, want: "checked 100/6972 scoring objects (requested sample)"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			checked := 6972
+			if test.sampled {
+				checked = 100
+			}
+			var out strings.Builder
+			printHuman(&out, app.VerifyReport{Targets: []app.VerifyTarget{{Target: "gcs", ReleaseID: "release", Checked: checked, Available: 6972, Sampled: test.sampled}}})
+			if !strings.Contains(out.String(), test.want) {
+				t.Fatalf("verification output %q does not contain %q", out.String(), test.want)
+			}
+		})
+	}
+}
+
 func TestStringListPreservesRepeatedValues(t *testing.T) {
 	var ids stringList
 	if err := ids.Set("PGS000002"); err != nil {

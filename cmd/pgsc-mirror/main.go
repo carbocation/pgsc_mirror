@@ -43,7 +43,6 @@ type options struct {
 	config   string
 	json     bool
 	dryRun   bool
-	full     bool
 	sample   int
 	apply    bool
 	pgsIDs   stringList
@@ -71,8 +70,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&o.config, "config", "", "path to TOML configuration")
 	fs.BoolVar(&o.json, "json", false, "emit structured JSON")
 	fs.BoolVar(&o.dryRun, "dry-run", false, "report changes without writing")
-	fs.BoolVar(&o.full, "full", false, "verify every available blob")
-	fs.IntVar(&o.sample, "sample", 0, "number of blobs to verify when not using --full")
+	fs.IntVar(&o.sample, "sample", 0, "limit verify to this many evenly distributed scoring objects (default: all)")
 	fs.BoolVar(&o.apply, "apply", false, "apply garbage collection (default is dry-run)")
 	fs.Var(&o.pgsIDs, "pgs-id", "PGS score ID to check (repeatable; probe only)")
 	fs.StringVar(&o.maxSize, "max-size", "100MiB", "maximum compressed scoring-file size (probe only)")
@@ -83,6 +81,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if fs.NArg() != 0 {
 		fmt.Fprintln(stderr, "error: unexpected arguments:", strings.Join(fs.Args(), " "))
+		return 2
+	}
+	if command == "verify" && o.sample < 0 {
+		fmt.Fprintln(stderr, "error: --sample must not be negative")
 		return 2
 	}
 	var maxBytes int64
@@ -145,7 +147,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "pull":
 		result, err = a.Pull(ctx, o.dryRun)
 	case "verify":
-		result, err = a.Verify(ctx, o.full, o.sample)
+		result, err = a.Verify(ctx, o.sample)
 	case "status":
 		result, err = a.Status(ctx)
 	case "rebuild-state":
@@ -229,12 +231,6 @@ func serviceReporter(w io.Writer, structured bool) app.ServiceReporter {
 			if result.ReleaseID != "" {
 				summary += "; release " + result.ReleaseID
 			}
-		case app.VerifyReport:
-			checked := 0
-			for _, target := range result.Targets {
-				checked += target.Checked
-			}
-			summary = fmt.Sprintf("verified %d object(s)", checked)
 		}
 		_, err := fmt.Fprintf(w, "%s %s succeeded: %s; next at %s\n", stamp, event.Operation, summary, formatEventTime(event.NextAt))
 		return err
@@ -345,7 +341,11 @@ func printHuman(w io.Writer, v any) {
 		}
 	case app.VerifyReport:
 		for _, t := range r.Targets {
-			fmt.Fprintf(w, "%s: release %s, checked %d", t.Target, t.ReleaseID, t.Checked)
+			scope := "full audit"
+			if t.Sampled {
+				scope = "requested sample"
+			}
+			fmt.Fprintf(w, "%s: release %s, checked %d/%d scoring objects (%s)", t.Target, t.ReleaseID, t.Checked, t.Available, scope)
 			if len(t.Failures) == 0 {
 				fmt.Fprintln(w, ", OK")
 			} else {

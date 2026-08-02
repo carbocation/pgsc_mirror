@@ -19,7 +19,6 @@ func serviceTestConfig(root, base string) config.Config {
 	cfg.Transfer.MaxAttempts = 1
 	cfg.Service.UpdateInterval = config.Duration{Duration: time.Hour}
 	cfg.Service.ReconcileInterval = config.Duration{Duration: 7 * 24 * time.Hour}
-	cfg.Service.VerifyInterval = config.Duration{Duration: time.Hour}
 	cfg.Service.ErrorBackoff = config.Duration{Duration: time.Millisecond}
 	return cfg
 }
@@ -384,13 +383,13 @@ func TestServiceRetriesAfterOperationalFailure(t *testing.T) {
 	}
 }
 
-func TestServiceSchedulesVerificationAfterSynchronization(t *testing.T) {
+func TestServiceDoesNotScheduleBlobVerification(t *testing.T) {
 	up := newSyntheticUpstream()
 	up.set("PGS000001", harmonizedHeaderFixture, "CC0", true)
 	srv := httptest.NewServer(up)
 	defer srv.Close()
 	cfg := serviceTestConfig(t.TempDir(), srv.URL)
-	cfg.Service.VerifyInterval = config.Duration{Duration: time.Millisecond}
+	cfg.Service.UpdateInterval = config.Duration{Duration: time.Millisecond}
 	a, err := New(context.Background(), cfg, true)
 	if err != nil {
 		t.Fatal(err)
@@ -400,51 +399,21 @@ func TestServiceSchedulesVerificationAfterSynchronization(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var events []ServiceEvent
-	err = a.Run(ctx, func(event ServiceEvent) error {
+	syncs := 0
+	if err := a.Run(ctx, func(event ServiceEvent) error {
 		events = append(events, event)
-		if event.Operation == "verify" && event.Status == ServiceSucceeded {
-			cancel()
+		if event.Status == ServiceSucceeded && (event.Operation == "reconcile" || event.Operation == "update") {
+			syncs++
+			if syncs == 2 {
+				cancel()
+			}
 		}
 		return nil
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if !hasServiceEvent(events, "reconcile", ServiceSucceeded) || !hasServiceEvent(events, "verify", ServiceSucceeded) {
-		t.Fatalf("scheduled verification did not complete: %+v", events)
-	}
-	lastVerify, ok, err := a.State.LastSuccessfulVerification(context.Background())
-	if err != nil || !ok {
-		t.Fatalf("verification schedule was not persisted: ok=%v err=%v", ok, err)
-	}
-
-	// Simulate a restart after enough downtime to make verification overdue.
-	// The service must verify immediately after catching up, rather than
-	// postponing verification by a fresh interval on every restart.
-	a.Config.Service.VerifyInterval = config.Duration{Duration: time.Hour}
-	a.now = func() time.Time { return lastVerify.Add(2 * time.Hour) }
-	restartCtx, restartCancel := context.WithTimeout(context.Background(), time.Second)
-	defer restartCancel()
-	var restartEvents []ServiceEvent
-	var fallback *time.Timer
-	err = a.Run(restartCtx, func(event ServiceEvent) error {
-		restartEvents = append(restartEvents, event)
-		if event.Operation == "update" && event.Status == ServiceSucceeded {
-			fallback = time.AfterFunc(100*time.Millisecond, restartCancel)
-		}
-		if event.Operation == "verify" && event.Status == ServiceSucceeded {
-			restartCancel()
-		}
-		return nil
-	})
-	if fallback != nil {
-		fallback.Stop()
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !hasServiceEvent(restartEvents, "update", ServiceSucceeded) || !hasServiceEvent(restartEvents, "verify", ServiceSucceeded) {
-		t.Fatalf("overdue verification was postponed after restart: %+v", restartEvents)
+	if syncs != 2 || hasServiceEvent(events, "verify", ServiceSucceeded) {
+		t.Fatalf("service performed unexpected scheduled work: %+v", events)
 	}
 }
 
