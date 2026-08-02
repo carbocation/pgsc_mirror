@@ -78,10 +78,15 @@ func seedLegacyRelease(t *testing.T, a *App, now time.Time, fixtures ...annotati
 		GenomeBuild:        "GRCh38",
 		ScoreLayoutVersion: model.ScoreLayoutVersion,
 	}
-	pointer, manifestTSV, err := attachManifestTSV(pointer, entries)
-	if err != nil {
-		t.Fatal(err)
+	var legacyTSV strings.Builder
+	legacyTSV.WriteString("release_id\tpgs_id\tgenome_build\n")
+	for _, entry := range entries {
+		fmt.Fprintf(&legacyTSV, "%s\t%s\t%s\n", entry.ReleaseID, entry.PGSID, entry.GenomeBuild)
 	}
+	manifestTSV := []byte(legacyTSV.String())
+	manifestTSVSum := sha256.Sum256(manifestTSV)
+	pointer.ManifestTSVKey = model.ManifestTSVKey(pointer.ReleaseID)
+	pointer.ManifestTSVSHA256 = hex.EncodeToString(manifestTSVSum[:])
 	if err := a.publish(ctx, pointer, scoreList, metadata, manifestBytes, manifestTSV); err != nil {
 		t.Fatal(err)
 	}
@@ -112,6 +117,18 @@ func TestAnnotateUsesOnlyStoredObjectsAndThenNoOps(t *testing.T) {
 		annotationFixture{PGSID: "PGS000002", Data: gzipFixture("mystery_a\tmystery_b\nvalue_a\tvalue_b\n")},
 		annotationFixture{PGSID: "PGS000003", Data: []byte("not a gzip stream")},
 	)
+	legacyEntries, _, err := a.readManifest(context.Background(), a.targets[0].Store, legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repairTargets, err := a.manifestTSVTargetsNeedingRepair(context.Background(), legacy, legacyEntries)
+	if err != nil || repairTargets != 0 {
+		t.Fatalf("legacy manifest TSV was treated as a current-renderer mismatch: targets=%d err=%v", repairTargets, err)
+	}
+	unchangedPointer, repaired, err := a.ensureManifestTSV(context.Background(), legacy, legacyEntries)
+	if err != nil || repaired || unchangedPointer.ManifestTSVSHA256 != legacy.ManifestTSVSHA256 {
+		t.Fatalf("legacy manifest TSV identity was not preserved: pointer=%+v repaired=%t err=%v", unchangedPointer, repaired, err)
+	}
 	secondary, err := localstore.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

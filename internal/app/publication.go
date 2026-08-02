@@ -514,16 +514,24 @@ func (a *App) repairLaggingTargets(ctx context.Context) (repair RepairReport, ru
 }
 
 func (a *App) manifestTSVTargetsNeedingRepair(ctx context.Context, pointer model.Pointer, entries []model.Entry) (int, error) {
-	expected, _, err := attachManifestTSV(pointer, entries)
+	key, sha256, present, err := manifestTSVIdentity(pointer)
 	if err != nil {
 		return 0, err
 	}
-	pointerNeedsRepair := pointer.ManifestTSVKey != expected.ManifestTSVKey || pointer.ManifestTSVSHA256 != expected.ManifestTSVSHA256
+	pointerNeedsRepair := !present
+	if !present {
+		expected, _, err := attachManifestTSV(pointer, entries)
+		if err != nil {
+			return 0, err
+		}
+		key = expected.ManifestTSVKey
+		sha256 = expected.ManifestTSVSHA256
+	}
 	targets := 0
 	for _, target := range a.targets {
 		needsRepair := pointerNeedsRepair
-		for _, key := range []string{expected.ManifestTSVKey, model.LatestManifestTSVKey} {
-			got, err := objectSHA256(ctx, target.Store, key)
+		for _, objectKey := range []string{key, model.LatestManifestTSVKey} {
+			got, err := objectSHA256(ctx, target.Store, objectKey)
 			if errors.Is(err, store.ErrNotFound) {
 				needsRepair = true
 				continue
@@ -531,7 +539,7 @@ func (a *App) manifestTSVTargetsNeedingRepair(ctx context.Context, pointer model
 			if err != nil {
 				return 0, err
 			}
-			if got != expected.ManifestTSVSHA256 {
+			if got != sha256 {
 				needsRepair = true
 			}
 		}
@@ -657,11 +665,43 @@ func attachManifestTSV(pointer model.Pointer, entries []model.Entry) (model.Poin
 	return pointer, data, nil
 }
 
+// manifestTSVIdentity validates the identity recorded by the release pointer.
+// An existing release's TSV is defined by this immutable identity, not by
+// rendering its JSONL entries with the current binary: renderers can gain
+// columns in later versions without invalidating historical releases.
+func manifestTSVIdentity(pointer model.Pointer) (key, sha256 string, present bool, err error) {
+	hasKey := pointer.ManifestTSVKey != ""
+	hasSHA := pointer.ManifestTSVSHA256 != ""
+	if hasKey != hasSHA {
+		return "", "", false, errors.New("manifest TSV identity is incomplete")
+	}
+	if !hasKey {
+		return "", "", false, nil
+	}
+	wantKey := model.ManifestTSVKey(pointer.ReleaseID)
+	if pointer.ManifestTSVKey != wantKey {
+		return "", "", false, fmt.Errorf("manifest TSV key is %q, want %q", pointer.ManifestTSVKey, wantKey)
+	}
+	return pointer.ManifestTSVKey, pointer.ManifestTSVSHA256, true, nil
+}
+
 func (a *App) ensureManifestTSV(ctx context.Context, pointer model.Pointer, entries []model.Entry) (model.Pointer, bool, error) {
 	original := pointer
-	pointer, data, err := attachManifestTSV(pointer, entries)
+	key, sha256, present, err := manifestTSVIdentity(pointer)
 	if err != nil {
 		return model.Pointer{}, false, err
+	}
+	var data []byte
+	if present {
+		data, err = readStoredSnapshot(ctx, a.targets[0].Store, key, sha256)
+		if err != nil {
+			return model.Pointer{}, false, fmt.Errorf("read release manifest TSV: %w", err)
+		}
+	} else {
+		pointer, data, err = attachManifestTSV(pointer, entries)
+		if err != nil {
+			return model.Pointer{}, false, err
+		}
 	}
 	changed := original.ManifestTSVKey != pointer.ManifestTSVKey || original.ManifestTSVSHA256 != pointer.ManifestTSVSHA256
 	for _, target := range a.targets {

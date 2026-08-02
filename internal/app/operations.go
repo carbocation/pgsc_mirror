@@ -45,12 +45,12 @@ func (a *App) Verify(ctx context.Context, sample int) (VerifyReport, error) {
 			result.Failures = append(result.Failures, fmt.Sprintf("catalog metadata version is %d, want %d", p.CatalogMetadataVersion, model.CatalogMetadataVersion))
 			failed = true
 		}
-		expectedPointer, _, err := attachManifestTSV(p, entries)
+		_, _, present, err := manifestTSVIdentity(p)
 		if err != nil {
 			result.Failures = append(result.Failures, "manifest TSV: "+err.Error())
 			failed = true
-		} else if p.ManifestTSVKey != expectedPointer.ManifestTSVKey || p.ManifestTSVSHA256 != expectedPointer.ManifestTSVSHA256 {
-			result.Failures = append(result.Failures, "manifest TSV identity is missing or differs from the rendered manifest")
+		} else if !present {
+			result.Failures = append(result.Failures, "manifest TSV identity is missing")
 			failed = true
 		} else {
 			if err := verifySnapshot(ctx, t.Store, p.ManifestTSVKey, p.ManifestTSVSHA256); err != nil {
@@ -170,17 +170,17 @@ func (a *App) Pull(ctx context.Context, dryRun bool) (RunReport, error) {
 	if p.CatalogMetadataVersion != model.CatalogMetadataVersion {
 		return RunReport{}, errors.New("source release does not publish the catalog phenotype metadata contract; run update against GCS first")
 	}
-	expectedPointer, manifestTSV, err := attachManifestTSV(p, entries)
+	_, _, present, err := manifestTSVIdentity(p)
 	if err != nil {
 		return RunReport{}, err
 	}
-	if p.ManifestTSVKey != expectedPointer.ManifestTSVKey || p.ManifestTSVSHA256 != expectedPointer.ManifestTSVSHA256 {
+	if !present {
 		return RunReport{}, errors.New("source release does not publish the manifest TSV contract; run update against GCS first")
 	}
-	if err := verifySnapshot(ctx, source.Store, p.ManifestTSVKey, p.ManifestTSVSHA256); err != nil {
+	manifestTSV, err := readStoredSnapshot(ctx, source.Store, p.ManifestTSVKey, p.ManifestTSVSHA256)
+	if err != nil {
 		return RunReport{}, fmt.Errorf("source release manifest TSV: %w", err)
 	}
-	p = expectedPointer
 	if dryRun {
 		return RunReport{Command: "pull", ReleaseID: p.ReleaseID, Changed: true, Message: fmt.Sprintf("dry run; would make %d manifest entries available locally", len(entries))}, nil
 	}
@@ -341,15 +341,15 @@ func (a *App) RebuildState(ctx context.Context, dryRun bool) (RunReport, error) 
 	if err != nil {
 		return RunReport{}, err
 	}
-	latestEntries, _, err := a.readManifest(ctx, t.Store, latest)
+	_, _, err = a.readManifest(ctx, t.Store, latest)
 	if err != nil {
 		return RunReport{}, err
 	}
-	expectedLatest, _, err := attachManifestTSV(latest, latestEntries)
+	_, _, latestTSVPresent, err := manifestTSVIdentity(latest)
 	if err != nil {
 		return RunReport{}, err
 	}
-	if latest.ManifestTSVKey != expectedLatest.ManifestTSVKey || latest.ManifestTSVSHA256 != expectedLatest.ManifestTSVSHA256 {
+	if !latestTSVPresent {
 		return RunReport{}, errors.New("current release does not publish the manifest TSV contract; run update first")
 	}
 	if latest.CatalogMetadataVersion != model.CatalogMetadataVersion {
@@ -399,11 +399,8 @@ func (a *App) RebuildState(ctx context.Context, dryRun bool) (RunReport, error) 
 		if err := requireCurrentScoreLayout(p, entries); err != nil {
 			continue
 		}
-		p, _, err = attachManifestTSV(p, entries)
-		if err != nil {
-			return RunReport{}, err
-		}
-		manifestTSVSHA, err := objectSHA256(ctx, t.Store, p.ManifestTSVKey)
+		manifestTSVKey := model.ManifestTSVKey(id)
+		manifestTSVSHA, err := objectSHA256(ctx, t.Store, manifestTSVKey)
 		if errors.Is(err, store.ErrNotFound) {
 			if id == latest.ReleaseID {
 				return RunReport{}, errors.New("current release manifest TSV is missing")
@@ -413,8 +410,10 @@ func (a *App) RebuildState(ctx context.Context, dryRun bool) (RunReport, error) 
 		if err != nil {
 			return RunReport{}, err
 		}
-		if manifestTSVSHA != p.ManifestTSVSHA256 {
-			return RunReport{}, fmt.Errorf("%s manifest TSV SHA-256 is %s, want %s", id, manifestTSVSHA, p.ManifestTSVSHA256)
+		p.ManifestTSVKey = manifestTSVKey
+		p.ManifestTSVSHA256 = manifestTSVSHA
+		if id == latest.ReleaseID && (p.ManifestTSVKey != latest.ManifestTSVKey || p.ManifestTSVSHA256 != latest.ManifestTSVSHA256) {
+			return RunReport{}, fmt.Errorf("%s manifest TSV SHA-256 is %s, want %s", id, manifestTSVSHA, latest.ManifestTSVSHA256)
 		}
 		releases = append(releases, state.RebuildRelease{Pointer: p, Entries: entries})
 	}
