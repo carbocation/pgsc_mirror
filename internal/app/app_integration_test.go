@@ -497,7 +497,7 @@ func TestUpdateBackfillsManifestTSVForCurrentRelease(t *testing.T) {
 	if !report.Changed {
 		t.Fatalf("manifest TSV backfill was not reported: %+v", report)
 	}
-	if report.Repair == nil || report.Repair.ManifestTSVTargets != 1 || !report.Repair.ManifestTSVBackfill || report.Repair.SynchronizedTargets != 0 || !strings.Contains(report.Message, "backfilled TSV manifest on 1 configured target(s)") {
+	if report.Repair == nil || report.Repair.ManifestTSVTargets != 1 || !report.Repair.ManifestTSVBackfill || report.Repair.SynchronizedTargets != 0 || !strings.Contains(report.Message, "backfilled TSV manifest on 1 configured target") {
 		t.Fatalf("manifest TSV backfill details are inaccurate: %+v", report)
 	}
 	current, _, err := a.latest(ctx)
@@ -793,7 +793,7 @@ func TestReconcileRepairsLaggingSecondaryPointer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !repaired.Changed || repaired.Repair == nil || repaired.Repair.SynchronizedTargets != 1 || !strings.Contains(repaired.Message, "synchronized 1 lagging secondary target(s)") {
+	if !repaired.Changed || repaired.Repair == nil || repaired.Repair.SynchronizedTargets != 1 || !strings.Contains(repaired.Message, "synchronized 1 lagging secondary target") {
 		t.Fatalf("repair was not reported: %+v", repaired)
 	}
 	secondaryPointer, _, err = a.readPointer(context.Background(), secondary)

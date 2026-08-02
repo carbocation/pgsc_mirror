@@ -82,12 +82,19 @@ func (r RepairReport) Description() string {
 		if r.ManifestTSVBackfill {
 			action = "backfilled TSV manifest on"
 		}
-		parts = append(parts, fmt.Sprintf("%s %d configured target(s)", action, r.ManifestTSVTargets))
+		parts = append(parts, fmt.Sprintf("%s %d configured %s", action, r.ManifestTSVTargets, plural(r.ManifestTSVTargets, "target", "targets")))
 	}
 	if r.SynchronizedTargets > 0 {
-		parts = append(parts, fmt.Sprintf("synchronized %d lagging secondary target(s)", r.SynchronizedTargets))
+		parts = append(parts, fmt.Sprintf("synchronized %d lagging secondary %s", r.SynchronizedTargets, plural(r.SynchronizedTargets, "target", "targets")))
 	}
 	return strings.Join(parts, "; ")
+}
+
+func plural(count int, singular, plural string) string {
+	if count == 1 {
+		return singular
+	}
+	return plural
 }
 
 type VerifyTarget struct {
