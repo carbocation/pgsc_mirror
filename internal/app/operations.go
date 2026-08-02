@@ -45,22 +45,13 @@ func (a *App) Verify(ctx context.Context, sample int) (VerifyReport, error) {
 			result.Failures = append(result.Failures, fmt.Sprintf("catalog metadata version is %d, want %d", p.CatalogMetadataVersion, model.CatalogMetadataVersion))
 			failed = true
 		}
-		_, _, present, err := manifestTSVIdentity(p)
-		if err != nil {
-			result.Failures = append(result.Failures, "manifest TSV: "+err.Error())
+		if err := verifySnapshot(ctx, t.Store, p.ManifestTSVKey, p.ManifestTSVSHA256); err != nil {
+			result.Failures = append(result.Failures, "release manifest TSV: "+err.Error())
 			failed = true
-		} else if !present {
-			result.Failures = append(result.Failures, "manifest TSV identity is missing")
+		}
+		if err := verifySnapshot(ctx, t.Store, model.LatestManifestTSVKey, p.ManifestTSVSHA256); err != nil {
+			result.Failures = append(result.Failures, "latest manifest TSV: "+err.Error())
 			failed = true
-		} else {
-			if err := verifySnapshot(ctx, t.Store, p.ManifestTSVKey, p.ManifestTSVSHA256); err != nil {
-				result.Failures = append(result.Failures, "release manifest TSV: "+err.Error())
-				failed = true
-			}
-			if err := verifySnapshot(ctx, t.Store, model.LatestManifestTSVKey, p.ManifestTSVSHA256); err != nil {
-				result.Failures = append(result.Failures, "latest manifest TSV: "+err.Error())
-				failed = true
-			}
 		}
 		if err := verifySnapshot(ctx, t.Store, model.ScoreListKey(p.ReleaseID), p.ScoreListSHA256); err != nil {
 			result.Failures = append(result.Failures, "score list: "+err.Error())
@@ -168,14 +159,7 @@ func (a *App) Pull(ctx context.Context, dryRun bool) (RunReport, error) {
 		return RunReport{}, err
 	}
 	if p.CatalogMetadataVersion != model.CatalogMetadataVersion {
-		return RunReport{}, errors.New("source release does not publish the catalog phenotype metadata contract; run update against GCS first")
-	}
-	_, _, present, err := manifestTSVIdentity(p)
-	if err != nil {
-		return RunReport{}, err
-	}
-	if !present {
-		return RunReport{}, errors.New("source release does not publish the manifest TSV contract; run update against GCS first")
+		return RunReport{}, errors.New("source release does not satisfy the required catalog phenotype metadata contract")
 	}
 	manifestTSV, err := readStoredSnapshot(ctx, source.Store, p.ManifestTSVKey, p.ManifestTSVSHA256)
 	if err != nil {
@@ -345,15 +329,8 @@ func (a *App) RebuildState(ctx context.Context, dryRun bool) (RunReport, error) 
 	if err != nil {
 		return RunReport{}, err
 	}
-	_, _, latestTSVPresent, err := manifestTSVIdentity(latest)
-	if err != nil {
-		return RunReport{}, err
-	}
-	if !latestTSVPresent {
-		return RunReport{}, errors.New("current release does not publish the manifest TSV contract; run update first")
-	}
 	if latest.CatalogMetadataVersion != model.CatalogMetadataVersion {
-		return RunReport{}, errors.New("current release does not publish the catalog phenotype metadata contract; run update first")
+		return RunReport{}, errors.New("current release does not satisfy the required catalog phenotype metadata contract")
 	}
 	objects, err := t.List(ctx, "releases")
 	if err != nil {
@@ -396,9 +373,6 @@ func (a *App) RebuildState(ctx context.Context, dryRun bool) (RunReport, error) 
 			return RunReport{}, err
 		}
 		p := model.Pointer{ReleaseID: id, ManifestKey: obj.Key, ManifestSHA256: hex.EncodeToString(sum[:]), ScoreListSHA256: scoreSHA, MetadataSHA256: metadataSHA, PublishedAt: published, EntryCount: len(entries), GenomeBuild: a.Config.GenomeBuild, HeaderInspectorVersion: observedHeaderInspectorVersion(entries), CatalogMetadataVersion: observedCatalogMetadataVersion(entries), ScoreLayoutVersion: model.ScoreLayoutVersion}
-		if err := requireCurrentScoreLayout(p, entries); err != nil {
-			continue
-		}
 		manifestTSVKey := model.ManifestTSVKey(id)
 		manifestTSVSHA, err := objectSHA256(ctx, t.Store, manifestTSVKey)
 		if errors.Is(err, store.ErrNotFound) {
@@ -412,6 +386,9 @@ func (a *App) RebuildState(ctx context.Context, dryRun bool) (RunReport, error) 
 		}
 		p.ManifestTSVKey = manifestTSVKey
 		p.ManifestTSVSHA256 = manifestTSVSHA
+		if err := requireCurrentScoreLayout(p, entries); err != nil {
+			continue
+		}
 		if id == latest.ReleaseID && (p.ManifestTSVKey != latest.ManifestTSVKey || p.ManifestTSVSHA256 != latest.ManifestTSVSHA256) {
 			return RunReport{}, fmt.Errorf("%s manifest TSV SHA-256 is %s, want %s", id, manifestTSVSHA, latest.ManifestTSVSHA256)
 		}

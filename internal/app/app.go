@@ -66,9 +66,8 @@ type RunReport struct {
 }
 
 type RepairReport struct {
-	SynchronizedTargets int  `json:"synchronized_targets"`
-	ManifestTSVTargets  int  `json:"manifest_tsv_targets"`
-	ManifestTSVBackfill bool `json:"manifest_tsv_backfill"`
+	SynchronizedTargets int `json:"synchronized_targets"`
+	ManifestTSVTargets  int `json:"manifest_tsv_targets"`
 }
 
 func (r RepairReport) Changed() bool {
@@ -78,11 +77,7 @@ func (r RepairReport) Changed() bool {
 func (r RepairReport) Description() string {
 	var parts []string
 	if r.ManifestTSVTargets > 0 {
-		action := "repaired TSV manifest publication on"
-		if r.ManifestTSVBackfill {
-			action = "backfilled TSV manifest on"
-		}
-		parts = append(parts, fmt.Sprintf("%s %d configured %s", action, r.ManifestTSVTargets, plural(r.ManifestTSVTargets, "target", "targets")))
+		parts = append(parts, fmt.Sprintf("repaired TSV manifest publication on %d configured %s", r.ManifestTSVTargets, plural(r.ManifestTSVTargets, "target", "targets")))
 	}
 	if r.SynchronizedTargets > 0 {
 		parts = append(parts, fmt.Sprintf("synchronized %d lagging secondary %s", r.SynchronizedTargets, plural(r.SynchronizedTargets, "target", "targets")))
@@ -266,18 +261,16 @@ func requireCurrentScoreLayout(pointer model.Pointer, entries []model.Entry) err
 			return fmt.Errorf("release %s entry %s has score_key %q; want %q", pointer.ReleaseID, entries[i].PGSID, entries[i].ScoreKey, want)
 		}
 	}
-	if (pointer.ManifestTSVKey == "") != (pointer.ManifestTSVSHA256 == "") {
-		return fmt.Errorf("release %s has incomplete manifest TSV identity", pointer.ReleaseID)
+	if pointer.ManifestTSVKey == "" || pointer.ManifestTSVSHA256 == "" {
+		return fmt.Errorf("release %s is missing its manifest TSV identity", pointer.ReleaseID)
 	}
-	if pointer.ManifestTSVKey != "" {
-		want := model.ManifestTSVKey(pointer.ReleaseID)
-		if pointer.ManifestTSVKey != want {
-			return fmt.Errorf("release %s has manifest_tsv_key %q; want %q", pointer.ReleaseID, pointer.ManifestTSVKey, want)
-		}
-		decoded, err := hex.DecodeString(pointer.ManifestTSVSHA256)
-		if err != nil || len(decoded) != sha256.Size {
-			return fmt.Errorf("release %s has invalid manifest_tsv_sha256", pointer.ReleaseID)
-		}
+	want := model.ManifestTSVKey(pointer.ReleaseID)
+	if pointer.ManifestTSVKey != want {
+		return fmt.Errorf("release %s has manifest_tsv_key %q; want %q", pointer.ReleaseID, pointer.ManifestTSVKey, want)
+	}
+	decoded, err := hex.DecodeString(pointer.ManifestTSVSHA256)
+	if err != nil || len(decoded) != sha256.Size {
+		return fmt.Errorf("release %s has invalid manifest_tsv_sha256", pointer.ReleaseID)
 	}
 	return nil
 }
@@ -511,19 +504,17 @@ func (a *App) reconcile(ctx context.Context, command string) (report RunReport, 
 	}
 	repair := RepairReport{SynchronizedTargets: repairedTargetCount}
 	if p.ReleaseID != "" {
-		manifestTargets, err := a.manifestTSVTargetsNeedingRepair(ctx, p, previous)
+		manifestTargets, err := a.manifestTSVTargetsNeedingRepair(ctx, p)
 		if err != nil {
 			return report, err
 		}
-		manifestBackfill := p.ManifestTSVKey == "" && p.ManifestTSVSHA256 == ""
 		var manifestTSVChanged bool
-		p, manifestTSVChanged, err = a.ensureManifestTSV(ctx, p, previous)
+		p, manifestTSVChanged, err = a.ensureManifestTSV(ctx, p)
 		if err != nil {
 			return report, err
 		}
 		if manifestTSVChanged {
 			repair.ManifestTSVTargets = manifestTargets
-			repair.ManifestTSVBackfill = manifestBackfill
 		}
 	}
 	if err := a.catchUpState(ctx, p, previous); err != nil {
@@ -694,7 +685,7 @@ func (a *App) Update(ctx context.Context, dryRun bool) (report RunReport, runErr
 		if err := requireSupportedAnnotations(pointer, nil); err != nil {
 			return report, err
 		}
-		if pointer.HeaderInspectorVersion < scoreheader.InspectorVersion || pointer.CatalogMetadataVersion < model.CatalogMetadataVersion {
+		if pointer.HeaderInspectorVersion < scoreheader.InspectorVersion {
 			annotation, err = a.Annotate(ctx, false)
 			if err != nil {
 				return report, fmt.Errorf("refresh stored-object annotations: %w", err)
@@ -763,8 +754,8 @@ func requireSupportedAnnotations(pointer model.Pointer, entries []model.Entry) e
 	if pointer.HeaderInspectorVersion > scoreheader.InspectorVersion {
 		return fmt.Errorf("published header inspector version %d is newer than this binary's version %d; upgrade pgsc-mirror before publishing", pointer.HeaderInspectorVersion, scoreheader.InspectorVersion)
 	}
-	if pointer.CatalogMetadataVersion > model.CatalogMetadataVersion {
-		return fmt.Errorf("published catalog metadata version %d is newer than this binary's version %d; upgrade pgsc-mirror before publishing", pointer.CatalogMetadataVersion, model.CatalogMetadataVersion)
+	if pointer.ReleaseID != "" && pointer.CatalogMetadataVersion != model.CatalogMetadataVersion {
+		return fmt.Errorf("published catalog metadata version is %d, but this binary requires %d", pointer.CatalogMetadataVersion, model.CatalogMetadataVersion)
 	}
 	for i := range entries {
 		if entries[i].Status == model.StatusReady && entries[i].Header != nil && entries[i].Header.InspectorVersion > scoreheader.InspectorVersion {

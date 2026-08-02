@@ -76,7 +76,7 @@ Unchanged scoring files reuse their versioned observation. `LATEST.json` records
 
 ## Stored-object annotation
 
-`annotate` refreshes versioned descriptive metadata exclusively from objects already owned by the mirror. It pins the current manifest release, reads outdated scoring-file headers only when necessary, joins catalog phenotype fields from the stored metadata snapshot, and publishes a new immutable manifest and pointer only after every required annotation succeeds. It never calls the PGS Catalog inventory, metadata, sidecar, or scoring-file endpoints.
+`annotate` refreshes versioned scoring-header observations exclusively from objects already owned by the mirror. It pins the current manifest release, reads outdated scoring-file headers only when necessary, and publishes a new immutable manifest and pointer only after every required inspection succeeds. It never calls the PGS Catalog inventory, metadata, sidecar, or scoring-file endpoints. Catalog names and phenotype fields are part of the ordinary reconciliation contract and are not retrofitted by `annotate`.
 
 Header inspection is the first annotation implemented through this path. An older release with absent or stale header observations can therefore be upgraded without a complete upstream reconciliation. The long-lived service performs this refresh automatically before its normal lightweight update check when the current pointer advertises an older inspector version. A newer binary may publish an annotation-only successor whose raw score MD5s and stored upstream snapshots are identical to its predecessor.
 

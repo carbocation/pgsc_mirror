@@ -1,7 +1,6 @@
 package app
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,11 +8,9 @@ import (
 	"fmt"
 	"io"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/carbocation/pgsc_mirror/internal/catalog"
 	"github.com/carbocation/pgsc_mirror/internal/manifest"
 	"github.com/carbocation/pgsc_mirror/internal/model"
 	"github.com/carbocation/pgsc_mirror/internal/store"
@@ -55,26 +52,25 @@ type AnnotationProgressReporter func(AnnotationProgress)
 
 // AnnotationReport describes one upstream-independent annotation pass.
 type AnnotationReport struct {
-	Command                string              `json:"command"`
-	SourceReleaseID        string              `json:"source_release_id,omitempty"`
-	ReleaseID              string              `json:"release_id,omitempty"`
-	DryRun                 bool                `json:"dry_run"`
-	Changed                bool                `json:"changed"`
-	UpstreamIndependent    bool                `json:"upstream_independent"`
-	RepairedTargets        bool                `json:"repaired_targets,omitempty"`
-	Repair                 *RepairReport       `json:"repair,omitempty"`
-	Available              int                 `json:"available"`
-	Inspected              int                 `json:"inspected"`
-	Updated                int                 `json:"updated"`
-	CatalogMetadataUpdated int                 `json:"catalog_metadata_updated"`
-	Unchanged              int                 `json:"unchanged"`
-	Recognized             int                 `json:"recognized"`
-	Unrecognized           int                 `json:"unrecognized"`
-	Unreadable             int                 `json:"unreadable"`
-	Failed                 int                 `json:"failed"`
-	Anomalies              []AnnotationAnomaly `json:"anomalies,omitempty"`
-	Failures               []AnnotationFailure `json:"failures,omitempty"`
-	Message                string              `json:"message"`
+	Command             string              `json:"command"`
+	SourceReleaseID     string              `json:"source_release_id,omitempty"`
+	ReleaseID           string              `json:"release_id,omitempty"`
+	DryRun              bool                `json:"dry_run"`
+	Changed             bool                `json:"changed"`
+	UpstreamIndependent bool                `json:"upstream_independent"`
+	RepairedTargets     bool                `json:"repaired_targets,omitempty"`
+	Repair              *RepairReport       `json:"repair,omitempty"`
+	Available           int                 `json:"available"`
+	Inspected           int                 `json:"inspected"`
+	Updated             int                 `json:"updated"`
+	Unchanged           int                 `json:"unchanged"`
+	Recognized          int                 `json:"recognized"`
+	Unrecognized        int                 `json:"unrecognized"`
+	Unreadable          int                 `json:"unreadable"`
+	Failed              int                 `json:"failed"`
+	Anomalies           []AnnotationAnomaly `json:"anomalies,omitempty"`
+	Failures            []AnnotationFailure `json:"failures,omitempty"`
+	Message             string              `json:"message"`
 }
 
 // Annotate refreshes versioned descriptive annotations using only the current
@@ -150,19 +146,17 @@ func (a *App) annotateCurrent(ctx context.Context, report AnnotationReport, writ
 			return report, err
 		}
 		repair := RepairReport{SynchronizedTargets: repairedTargets}
-		manifestTargets, err := a.manifestTSVTargetsNeedingRepair(ctx, pointer, entries)
+		manifestTargets, err := a.manifestTSVTargetsNeedingRepair(ctx, pointer)
 		if err != nil {
 			return report, err
 		}
-		manifestBackfill := pointer.ManifestTSVKey == "" && pointer.ManifestTSVSHA256 == ""
 		var manifestTSVRepaired bool
-		pointer, manifestTSVRepaired, err = a.ensureManifestTSV(ctx, pointer, entries)
+		pointer, manifestTSVRepaired, err = a.ensureManifestTSV(ctx, pointer)
 		if err != nil {
 			return report, err
 		}
 		if manifestTSVRepaired {
 			repair.ManifestTSVTargets = manifestTargets
-			repair.ManifestTSVBackfill = manifestBackfill
 		}
 		report.RepairedTargets = repair.Changed()
 		if repair.Changed() {
@@ -182,19 +176,7 @@ func (a *App) annotateCurrent(ctx context.Context, report AnnotationReport, writ
 		return report, fmt.Errorf("annotation failed for %d scoring file(s)", report.Failed)
 	}
 
-	needsCatalogMetadata := pointer.CatalogMetadataVersion < model.CatalogMetadataVersion
-	var metadata []byte
-	if needsCatalogMetadata {
-		metadata, err = readStoredSnapshot(ctx, a.targets[0].Store, model.MetadataKey(pointer.ReleaseID), pointer.MetadataSHA256)
-		if err != nil {
-			return report, fmt.Errorf("read stored metadata: %w", err)
-		}
-		report.CatalogMetadataUpdated, err = applyCatalogMetadata(entries, metadata)
-		if err != nil {
-			return report, err
-		}
-	}
-	needsPublication := report.Updated > 0 || (report.Available > 0 && pointer.HeaderInspectorVersion < scoreheader.InspectorVersion) || needsCatalogMetadata
+	needsPublication := report.Updated > 0 || (report.Available > 0 && pointer.HeaderInspectorVersion < scoreheader.InspectorVersion)
 	report.Changed = needsPublication || report.RepairedTargets
 	if !needsPublication {
 		report.ReleaseID = pointer.ReleaseID
@@ -210,11 +192,9 @@ func (a *App) annotateCurrent(ctx context.Context, report AnnotationReport, writ
 	if err != nil {
 		return report, fmt.Errorf("read stored score list: %w", err)
 	}
-	if metadata == nil {
-		metadata, err = readStoredSnapshot(ctx, a.targets[0].Store, model.MetadataKey(pointer.ReleaseID), pointer.MetadataSHA256)
-		if err != nil {
-			return report, fmt.Errorf("read stored metadata: %w", err)
-		}
+	metadata, err := readStoredSnapshot(ctx, a.targets[0].Store, model.MetadataKey(pointer.ReleaseID), pointer.MetadataSHA256)
+	if err != nil {
+		return report, fmt.Errorf("read stored metadata: %w", err)
 	}
 	now := a.now().UTC()
 	releaseID, err := manifest.ReleaseID(now, entries, scoreList, metadata)
@@ -240,7 +220,7 @@ func (a *App) annotateCurrent(ctx context.Context, report AnnotationReport, writ
 		EntryCount:             len(entries),
 		GenomeBuild:            pointer.GenomeBuild,
 		HeaderInspectorVersion: observedHeaderInspectorVersion(entries),
-		CatalogMetadataVersion: model.CatalogMetadataVersion,
+		CatalogMetadataVersion: pointer.CatalogMetadataVersion,
 		ScoreLayoutVersion:     pointer.ScoreLayoutVersion,
 	}
 	annotated, manifestTSV, err := attachManifestTSV(annotated, entries)
@@ -248,7 +228,7 @@ func (a *App) annotateCurrent(ctx context.Context, report AnnotationReport, writ
 		return report, err
 	}
 	if report.DryRun {
-		report.Message = annotationPublicationMessage("would publish", report)
+		report.Message = fmt.Sprintf("would publish stored-header annotations for %d scoring file(s); no upstream access", report.Updated)
 		return report, nil
 	}
 	if err := a.publish(ctx, annotated, scoreList, metadata, manifestBytes, manifestTSV); err != nil {
@@ -258,52 +238,11 @@ func (a *App) annotateCurrent(ctx context.Context, report AnnotationReport, writ
 	if err := a.State.RecordRelease(ctx, annotated, entries); err != nil {
 		return report, err
 	}
-	report.Message = annotationPublicationMessage("published", report)
+	report.Message = fmt.Sprintf("published stored-header annotations for %d scoring file(s); no upstream access", report.Updated)
 	if report.Repair != nil {
 		report.Message += "; " + report.Repair.Description()
 	}
 	return report, nil
-}
-
-func applyCatalogMetadata(entries []model.Entry, snapshot []byte) (int, error) {
-	metadata, err := catalog.ParseMetadata(bytes.NewReader(snapshot))
-	if err != nil {
-		return 0, fmt.Errorf("parse stored catalog metadata: %w", err)
-	}
-	updated := 0
-	for i := range entries {
-		m, ok := metadata[entries[i].PGSID]
-		if !ok {
-			if entries[i].Status == model.StatusReady {
-				return 0, fmt.Errorf("stored catalog metadata has no row for %s", entries[i].PGSID)
-			}
-			continue
-		}
-		changed := entries[i].PGSName != m.PGSName || entries[i].TraitReported != m.TraitReported || entries[i].TraitMapped != m.TraitMapped || entries[i].TraitEFO != m.TraitEFO || entries[i].License != m.License
-		entries[i].PGSName = m.PGSName
-		entries[i].TraitReported = m.TraitReported
-		entries[i].TraitMapped = m.TraitMapped
-		entries[i].TraitEFO = m.TraitEFO
-		entries[i].License = m.License
-		if changed {
-			updated++
-		}
-	}
-	return updated, nil
-}
-
-func annotationPublicationMessage(verb string, report AnnotationReport) string {
-	var parts []string
-	if report.CatalogMetadataUpdated > 0 {
-		parts = append(parts, fmt.Sprintf("catalog phenotype metadata for %d score(s)", report.CatalogMetadataUpdated))
-	}
-	if report.Updated > 0 {
-		parts = append(parts, fmt.Sprintf("stored-header annotations for %d scoring file(s)", report.Updated))
-	}
-	if len(parts) == 0 {
-		parts = append(parts, "current annotation contract")
-	}
-	return verb + " " + strings.Join(parts, " and ") + "; no upstream access"
 }
 
 type annotationResult struct {

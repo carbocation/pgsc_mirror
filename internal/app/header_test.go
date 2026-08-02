@@ -66,17 +66,21 @@ func TestUpdateAnnotatesOutdatedManifestHeader(t *testing.T) {
 	sourceID := "20260801T100000Z-000000000000"
 	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
 	entry := model.Entry{
-		ReleaseID:   sourceID,
-		PGSID:       "PGS000001",
-		GenomeBuild: "GRCh38",
-		SourceURL:   srv.URL + "/root/scores/PGS000001/ScoringFiles/Harmonized/PGS000001_hmPOS_GRCh38.txt.gz",
-		SourceMD5:   sum,
-		SizeBytes:   int64(len(data)),
-		ScoreKey:    model.ScoreKey("PGS000001", "GRCh38"),
-		FirstSeenAt: now,
-		LastSeenAt:  now,
-		Status:      model.StatusReady,
-		License:     "CC0",
+		ReleaseID:     sourceID,
+		PGSID:         "PGS000001",
+		PGSName:       "name-PGS000001",
+		TraitReported: "reported-PGS000001",
+		TraitMapped:   "mapped-PGS000001",
+		TraitEFO:      "EFO_000001",
+		GenomeBuild:   "GRCh38",
+		SourceURL:     srv.URL + "/root/scores/PGS000001/ScoringFiles/Harmonized/PGS000001_hmPOS_GRCh38.txt.gz",
+		SourceMD5:     sum,
+		SizeBytes:     int64(len(data)),
+		ScoreKey:      model.ScoreKey("PGS000001", "GRCh38"),
+		FirstSeenAt:   now,
+		LastSeenAt:    now,
+		Status:        model.StatusReady,
+		License:       "CC0",
 	}
 	if _, err := a.targets[0].Put(ctx, entry.ScoreKey, bytes.NewReader(data), store.PutOptions{DoesNotExist: true}); err != nil {
 		t.Fatal(err)
@@ -85,7 +89,7 @@ func TestUpdateAnnotatesOutdatedManifestHeader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pointer := model.Pointer{ReleaseID: sourceID, ManifestKey: model.ManifestKey(sourceID), ManifestSHA256: manifestSHA, PublishedAt: now, EntryCount: 1, GenomeBuild: "GRCh38", ScoreLayoutVersion: model.ScoreLayoutVersion}
+	pointer := model.Pointer{ReleaseID: sourceID, ManifestKey: model.ManifestKey(sourceID), ManifestSHA256: manifestSHA, PublishedAt: now, EntryCount: 1, GenomeBuild: "GRCh38", CatalogMetadataVersion: model.CatalogMetadataVersion, ScoreLayoutVersion: model.ScoreLayoutVersion}
 	pointer, manifestTSV, err := attachManifestTSV(pointer, []model.Entry{entry})
 	if err != nil {
 		t.Fatal(err)

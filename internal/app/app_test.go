@@ -9,9 +9,9 @@ func TestRepairReportDescription(t *testing.T) {
 		want   string
 	}{
 		{
-			name:   "single manifest backfill",
-			report: RepairReport{ManifestTSVTargets: 1, ManifestTSVBackfill: true},
-			want:   "backfilled TSV manifest on 1 configured target",
+			name:   "single manifest repair",
+			report: RepairReport{ManifestTSVTargets: 1},
+			want:   "repaired TSV manifest publication on 1 configured target",
 		},
 		{
 			name:   "multiple manifest repairs",

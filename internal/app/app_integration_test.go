@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/carbocation/pgsc_mirror/internal/config"
-	"github.com/carbocation/pgsc_mirror/internal/manifest"
 	"github.com/carbocation/pgsc_mirror/internal/model"
 	"github.com/carbocation/pgsc_mirror/internal/store"
 	localstore "github.com/carbocation/pgsc_mirror/internal/store/local"
@@ -451,7 +450,7 @@ func TestReconcileLifecycleAndRecovery(t *testing.T) {
 	}
 }
 
-func TestUpdateBackfillsManifestTSVForCurrentRelease(t *testing.T) {
+func TestUpdateRepairsLatestManifestTSVFromImmutableRelease(t *testing.T) {
 	up := newSyntheticUpstream()
 	up.set("PGS000001", "first-v1", "CC0", true)
 	srv := httptest.NewServer(up)
@@ -465,52 +464,6 @@ func TestUpdateBackfillsManifestTSVForCurrentRelease(t *testing.T) {
 	if _, err := a.Reconcile(ctx, false); err != nil {
 		t.Fatal(err)
 	}
-	pointer, pointerInfo, err := a.readPointer(ctx, a.targets[0].Store)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, key := range []string{pointer.ManifestTSVKey, model.LatestManifestTSVKey} {
-		info, err := a.targets[0].Stat(ctx, key)
-		if err != nil {
-			t.Fatal(err)
-		}
-		generation := info.Generation
-		if err := a.targets[0].Delete(ctx, key, store.DeleteOptions{GenerationMatch: &generation}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	pointer.ManifestTSVKey = ""
-	pointer.ManifestTSVSHA256 = ""
-	pointerBytes, err := manifest.PointerJSON(pointer)
-	if err != nil {
-		t.Fatal(err)
-	}
-	generation := pointerInfo.Generation
-	if _, err := a.targets[0].Put(ctx, model.LatestKey, bytes.NewReader(pointerBytes), store.PutOptions{GenerationMatch: &generation, ContentType: "application/json"}); err != nil {
-		t.Fatal(err)
-	}
-
-	report, err := a.Update(ctx, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !report.Changed {
-		t.Fatalf("manifest TSV backfill was not reported: %+v", report)
-	}
-	if report.Repair == nil || report.Repair.ManifestTSVTargets != 1 || !report.Repair.ManifestTSVBackfill || report.Repair.SynchronizedTargets != 0 || !strings.Contains(report.Message, "backfilled TSV manifest on 1 configured target") {
-		t.Fatalf("manifest TSV backfill details are inaccurate: %+v", report)
-	}
-	current, _, err := a.latest(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if current.ManifestTSVKey == "" || current.ManifestTSVSHA256 == "" {
-		t.Fatalf("manifest TSV identity was not restored: %+v", current)
-	}
-	if _, err := a.Verify(ctx, 0); err != nil {
-		t.Fatal(err)
-	}
-
 	latestTSV, latestInfo, err := a.targets[0].Open(ctx, model.LatestManifestTSVKey)
 	if err != nil {
 		t.Fatal(err)
@@ -521,7 +474,7 @@ func TestUpdateBackfillsManifestTSVForCurrentRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	corrupt[0] ^= 1
-	generation = latestInfo.Generation
+	generation := latestInfo.Generation
 	if _, err := a.targets[0].Put(ctx, model.LatestManifestTSVKey, bytes.NewReader(corrupt), store.PutOptions{GenerationMatch: &generation, ContentType: "text/tab-separated-values; charset=utf-8"}); err != nil {
 		t.Fatal(err)
 	}
@@ -531,6 +484,9 @@ func TestUpdateBackfillsManifestTSVForCurrentRelease(t *testing.T) {
 	}
 	if !repaired.Changed {
 		t.Fatalf("same-size latest TSV corruption was not repaired: %+v", repaired)
+	}
+	if repaired.Repair == nil || repaired.Repair.ManifestTSVTargets != 1 || repaired.Repair.SynchronizedTargets != 0 || !strings.Contains(repaired.Message, "repaired TSV manifest publication on 1 configured target") {
+		t.Fatalf("manifest TSV repair details are inaccurate: %+v", repaired)
 	}
 	if _, err := a.Verify(ctx, 0); err != nil {
 		t.Fatal(err)

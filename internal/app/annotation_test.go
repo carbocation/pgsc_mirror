@@ -29,7 +29,7 @@ type annotationFixture struct {
 	Data  []byte
 }
 
-func seedLegacyRelease(t *testing.T, a *App, now time.Time, fixtures ...annotationFixture) model.Pointer {
+func seedUnannotatedRelease(t *testing.T, a *App, now time.Time, fixtures ...annotationFixture) model.Pointer {
 	t.Helper()
 	ctx := context.Background()
 	releaseID := "20260801T100000Z-000000000000"
@@ -37,17 +37,21 @@ func seedLegacyRelease(t *testing.T, a *App, now time.Time, fixtures ...annotati
 	for _, fixture := range fixtures {
 		sum := md5hex(fixture.Data)
 		entry := model.Entry{
-			ReleaseID:   releaseID,
-			PGSID:       fixture.PGSID,
-			GenomeBuild: "GRCh38",
-			SourceURL:   "https://upstream.invalid/" + fixture.PGSID + ".txt.gz",
-			SourceMD5:   sum,
-			SizeBytes:   int64(len(fixture.Data)),
-			ScoreKey:    model.ScoreKey(fixture.PGSID, "GRCh38"),
-			FirstSeenAt: now,
-			LastSeenAt:  now,
-			Status:      model.StatusReady,
-			License:     "test",
+			ReleaseID:     releaseID,
+			PGSID:         fixture.PGSID,
+			PGSName:       "name-" + fixture.PGSID,
+			TraitReported: "reported-" + fixture.PGSID,
+			TraitMapped:   "mapped-" + fixture.PGSID,
+			TraitEFO:      "EFO_" + strings.TrimPrefix(fixture.PGSID, "PGS"),
+			GenomeBuild:   "GRCh38",
+			SourceURL:     "https://upstream.invalid/" + fixture.PGSID + ".txt.gz",
+			SourceMD5:     sum,
+			SizeBytes:     int64(len(fixture.Data)),
+			ScoreKey:      model.ScoreKey(fixture.PGSID, "GRCh38"),
+			FirstSeenAt:   now,
+			LastSeenAt:    now,
+			Status:        model.StatusReady,
+			License:       "test",
 		}
 		if err := putImmutable(ctx, a.targets[0].Store, entry.ScoreKey, fixture.Data, store.PutOptions{DoesNotExist: true}); err != nil {
 			t.Fatal(err)
@@ -68,25 +72,21 @@ func seedLegacyRelease(t *testing.T, a *App, now time.Time, fixtures ...annotati
 	scoreSum := sha256.Sum256(scoreList)
 	metadataSum := sha256.Sum256(metadata)
 	pointer := model.Pointer{
-		ReleaseID:          releaseID,
-		ManifestKey:        model.ManifestKey(releaseID),
-		ManifestSHA256:     manifestSHA,
-		ScoreListSHA256:    hex.EncodeToString(scoreSum[:]),
-		MetadataSHA256:     hex.EncodeToString(metadataSum[:]),
-		PublishedAt:        now,
-		EntryCount:         len(entries),
-		GenomeBuild:        "GRCh38",
-		ScoreLayoutVersion: model.ScoreLayoutVersion,
+		ReleaseID:              releaseID,
+		ManifestKey:            model.ManifestKey(releaseID),
+		ManifestSHA256:         manifestSHA,
+		ScoreListSHA256:        hex.EncodeToString(scoreSum[:]),
+		MetadataSHA256:         hex.EncodeToString(metadataSum[:]),
+		PublishedAt:            now,
+		EntryCount:             len(entries),
+		GenomeBuild:            "GRCh38",
+		CatalogMetadataVersion: model.CatalogMetadataVersion,
+		ScoreLayoutVersion:     model.ScoreLayoutVersion,
 	}
-	var legacyTSV strings.Builder
-	legacyTSV.WriteString("release_id\tpgs_id\tgenome_build\n")
-	for _, entry := range entries {
-		fmt.Fprintf(&legacyTSV, "%s\t%s\t%s\n", entry.ReleaseID, entry.PGSID, entry.GenomeBuild)
+	pointer, manifestTSV, err := attachManifestTSV(pointer, entries)
+	if err != nil {
+		t.Fatal(err)
 	}
-	manifestTSV := []byte(legacyTSV.String())
-	manifestTSVSum := sha256.Sum256(manifestTSV)
-	pointer.ManifestTSVKey = model.ManifestTSVKey(pointer.ReleaseID)
-	pointer.ManifestTSVSHA256 = hex.EncodeToString(manifestTSVSum[:])
 	if err := a.publish(ctx, pointer, scoreList, metadata, manifestBytes, manifestTSV); err != nil {
 		t.Fatal(err)
 	}
@@ -112,23 +112,11 @@ func TestAnnotateUsesOnlyStoredObjectsAndThenNoOps(t *testing.T) {
 	}
 	defer a.Close()
 	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
-	legacy := seedLegacyRelease(t, a, now,
+	source := seedUnannotatedRelease(t, a, now,
 		annotationFixture{PGSID: "PGS000001", Data: gzipFixture(harmonizedHeaderFixture)},
 		annotationFixture{PGSID: "PGS000002", Data: gzipFixture("mystery_a\tmystery_b\nvalue_a\tvalue_b\n")},
 		annotationFixture{PGSID: "PGS000003", Data: []byte("not a gzip stream")},
 	)
-	legacyEntries, _, err := a.readManifest(context.Background(), a.targets[0].Store, legacy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repairTargets, err := a.manifestTSVTargetsNeedingRepair(context.Background(), legacy, legacyEntries)
-	if err != nil || repairTargets != 0 {
-		t.Fatalf("legacy manifest TSV was treated as a current-renderer mismatch: targets=%d err=%v", repairTargets, err)
-	}
-	unchangedPointer, repaired, err := a.ensureManifestTSV(context.Background(), legacy, legacyEntries)
-	if err != nil || repaired || unchangedPointer.ManifestTSVSHA256 != legacy.ManifestTSVSHA256 {
-		t.Fatalf("legacy manifest TSV identity was not preserved: pointer=%+v repaired=%t err=%v", unchangedPointer, repaired, err)
-	}
 	secondary, err := localstore.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -146,7 +134,7 @@ func TestAnnotateUsesOnlyStoredObjectsAndThenNoOps(t *testing.T) {
 	if upstreamRequests.Load() != 0 {
 		t.Fatalf("annotation made %d upstream request(s)", upstreamRequests.Load())
 	}
-	if !report.UpstreamIndependent || !report.Changed || !report.RepairedTargets || report.SourceReleaseID != legacy.ReleaseID || report.ReleaseID == legacy.ReleaseID {
+	if !report.UpstreamIndependent || !report.Changed || !report.RepairedTargets || report.SourceReleaseID != source.ReleaseID || report.ReleaseID == source.ReleaseID {
 		t.Fatalf("unexpected annotation report: %+v", report)
 	}
 	if report.Available != 3 || report.Inspected != 3 || report.Updated != 3 || report.Recognized != 1 || report.Unrecognized != 1 || report.Unreadable != 1 || report.Failed != 0 {
@@ -169,8 +157,8 @@ func TestAnnotateUsesOnlyStoredObjectsAndThenNoOps(t *testing.T) {
 	if pointer.HeaderInspectorVersion != scoreheader.InspectorVersion || len(entries) != 3 {
 		t.Fatalf("annotated release is incomplete: pointer=%+v entries=%+v", pointer, entries)
 	}
-	if pointer.CatalogMetadataVersion != model.CatalogMetadataVersion || report.CatalogMetadataUpdated != 3 || entries[0].PGSName != "name-PGS000001" || entries[0].TraitReported != "reported-PGS000001" || entries[0].TraitMapped != "mapped-PGS000001" || entries[0].TraitEFO != "EFO_000001" {
-		t.Fatalf("catalog phenotype metadata was not annotated: pointer=%+v report=%+v entry=%+v", pointer, report, entries[0])
+	if pointer.CatalogMetadataVersion != model.CatalogMetadataVersion || entries[0].PGSName != "name-PGS000001" || entries[0].TraitReported != "reported-PGS000001" || entries[0].TraitMapped != "mapped-PGS000001" || entries[0].TraitEFO != "EFO_000001" {
+		t.Fatalf("catalog phenotype metadata was not preserved: pointer=%+v entry=%+v", pointer, entries[0])
 	}
 	for _, entry := range entries {
 		if entry.Header == nil || !entry.Header.Current() {
@@ -237,7 +225,7 @@ func TestAnnotateDryRunDoesNotPublishOrLease(t *testing.T) {
 	}
 	defer a.Close()
 	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
-	legacy := seedLegacyRelease(t, a, now, annotationFixture{PGSID: "PGS000001", Data: gzipFixture(harmonizedHeaderFixture)})
+	source := seedUnannotatedRelease(t, a, now, annotationFixture{PGSID: "PGS000001", Data: gzipFixture(harmonizedHeaderFixture)})
 	a.now = func() time.Time { return now.Add(time.Minute) }
 
 	report, err := a.Annotate(context.Background(), true)
@@ -251,7 +239,7 @@ func TestAnnotateDryRunDoesNotPublishOrLease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pointer.ReleaseID != legacy.ReleaseID || entries[0].Header != nil {
+	if pointer.ReleaseID != source.ReleaseID || entries[0].Header != nil {
 		t.Fatalf("dry run changed the published release: pointer=%+v entries=%+v", pointer, entries)
 	}
 	if _, err := a.targets[0].Stat(context.Background(), model.LeaseKey); !errors.Is(err, store.ErrNotFound) {
@@ -280,7 +268,7 @@ func TestAnnotateStoredObjectFailureDoesNotAdvancePointer(t *testing.T) {
 	}
 	defer a.Close()
 	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
-	legacy := seedLegacyRelease(t, a, now,
+	source := seedUnannotatedRelease(t, a, now,
 		annotationFixture{PGSID: "PGS000001", Data: gzipFixture(harmonizedHeaderFixture)},
 		annotationFixture{PGSID: "PGS000002", Data: gzipFixture(strings.Replace(harmonizedHeaderFixture, "PGS000001", "PGS000002", 1))},
 	)
@@ -298,8 +286,8 @@ func TestAnnotateStoredObjectFailureDoesNotAdvancePointer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pointer.ReleaseID != legacy.ReleaseID {
-		t.Fatalf("LATEST advanced across annotation failure: %s -> %s", legacy.ReleaseID, pointer.ReleaseID)
+	if pointer.ReleaseID != source.ReleaseID {
+		t.Fatalf("LATEST advanced across annotation failure: %s -> %s", source.ReleaseID, pointer.ReleaseID)
 	}
 	if _, err := a.targets[0].Stat(context.Background(), model.LeaseKey); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("failed annotation retained its lease: %v", err)
@@ -336,7 +324,7 @@ func TestAnnotateRejectsNewerAnnotationVersionWithoutUpstreamAccess(t *testing.T
 	}
 	defer a.Close()
 	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
-	pointer := seedLegacyRelease(t, a, now, annotationFixture{PGSID: "PGS000001", Data: gzipFixture(harmonizedHeaderFixture)})
+	pointer := seedUnannotatedRelease(t, a, now, annotationFixture{PGSID: "PGS000001", Data: gzipFixture(harmonizedHeaderFixture)})
 	pointer.HeaderInspectorVersion = scoreheader.InspectorVersion + 1
 	replaceLatestPointer(t, a, pointer)
 
@@ -354,28 +342,32 @@ func TestAnnotateRejectsNewerAnnotationVersionWithoutUpstreamAccess(t *testing.T
 	}
 }
 
-func TestAnnotateRejectsNewerCatalogMetadataVersionWithoutUpstreamAccess(t *testing.T) {
-	var upstreamRequests atomic.Int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		upstreamRequests.Add(1)
-		http.Error(w, "upstream must not be contacted", http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-	a, err := New(context.Background(), integrationConfig(t.TempDir(), srv.URL), true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer a.Close()
-	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
-	pointer := seedLegacyRelease(t, a, now, annotationFixture{PGSID: "PGS000001", Data: gzipFixture(harmonizedHeaderFixture)})
-	pointer.CatalogMetadataVersion = model.CatalogMetadataVersion + 1
-	replaceLatestPointer(t, a, pointer)
+func TestAnnotateRequiresExactCatalogMetadataVersionWithoutUpstreamAccess(t *testing.T) {
+	for name, version := range map[string]int{"outdated": 0, "newer": model.CatalogMetadataVersion + 1} {
+		t.Run(name, func(t *testing.T) {
+			var upstreamRequests atomic.Int64
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				upstreamRequests.Add(1)
+				http.Error(w, "upstream must not be contacted", http.StatusInternalServerError)
+			}))
+			defer srv.Close()
+			a, err := New(context.Background(), integrationConfig(t.TempDir(), srv.URL), true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer a.Close()
+			now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+			pointer := seedUnannotatedRelease(t, a, now, annotationFixture{PGSID: "PGS000001", Data: gzipFixture(harmonizedHeaderFixture)})
+			pointer.CatalogMetadataVersion = version
+			replaceLatestPointer(t, a, pointer)
 
-	if _, err := a.Annotate(context.Background(), false); err == nil {
-		t.Fatal("annotation accepted a newer catalog metadata version")
-	}
-	if upstreamRequests.Load() != 0 {
-		t.Fatalf("version rejection made %d upstream request(s)", upstreamRequests.Load())
+			if _, err := a.Annotate(context.Background(), false); err == nil {
+				t.Fatalf("annotation accepted catalog metadata version %d", version)
+			}
+			if upstreamRequests.Load() != 0 {
+				t.Fatalf("version rejection made %d upstream request(s)", upstreamRequests.Load())
+			}
+		})
 	}
 }
 
@@ -388,7 +380,7 @@ func TestAnnotateRejectsCorruptStoredSnapshotWithoutAdvancingPointer(t *testing.
 	}
 	defer a.Close()
 	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
-	pointer := seedLegacyRelease(t, a, now, annotationFixture{PGSID: "PGS000001", Data: gzipFixture(harmonizedHeaderFixture)})
+	pointer := seedUnannotatedRelease(t, a, now, annotationFixture{PGSID: "PGS000001", Data: gzipFixture(harmonizedHeaderFixture)})
 	pointer.ScoreListSHA256 = strings.Repeat("0", 64)
 	replaceLatestPointer(t, a, pointer)
 
@@ -413,7 +405,7 @@ func TestAnnotatePublicationFailureDoesNotAdvancePointer(t *testing.T) {
 	}
 	defer a.Close()
 	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
-	legacy := seedLegacyRelease(t, a, now, annotationFixture{PGSID: "PGS000001", Data: gzipFixture(harmonizedHeaderFixture)})
+	source := seedUnannotatedRelease(t, a, now, annotationFixture{PGSID: "PGS000001", Data: gzipFixture(harmonizedHeaderFixture)})
 	a.now = func() time.Time { return now.Add(time.Minute) }
 	a.targets[0].Store = &failingStore{Store: a.targets[0].Store, failSuffix: "/manifest.jsonl.gz"}
 
@@ -424,8 +416,8 @@ func TestAnnotatePublicationFailureDoesNotAdvancePointer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pointer.ReleaseID != legacy.ReleaseID {
-		t.Fatalf("LATEST advanced across failed annotation publication: %s -> %s", legacy.ReleaseID, pointer.ReleaseID)
+	if pointer.ReleaseID != source.ReleaseID {
+		t.Fatalf("LATEST advanced across failed annotation publication: %s -> %s", source.ReleaseID, pointer.ReleaseID)
 	}
 }
 
@@ -460,7 +452,7 @@ func TestUpdateAnnotatesBeforeLightweightUpstreamCheck(t *testing.T) {
 	}
 	defer a.Close()
 	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
-	legacy := seedLegacyRelease(t, a, now, annotationFixture{PGSID: "PGS000001", Data: gzipFixture(harmonizedHeaderFixture)})
+	source := seedUnannotatedRelease(t, a, now, annotationFixture{PGSID: "PGS000001", Data: gzipFixture(harmonizedHeaderFixture)})
 	if err := a.State.PutSentinel(context.Background(), state.Sentinel{Name: "score_list", ETag: `"list-1"`, ObservedAt: now}); err != nil {
 		t.Fatal(err)
 	}
@@ -473,7 +465,7 @@ func TestUpdateAnnotatesBeforeLightweightUpstreamCheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !report.Changed || report.ReleaseID == legacy.ReleaseID || !strings.Contains(report.Message, "catalog phenotype metadata for 1 score(s)") {
+	if !report.Changed || report.ReleaseID == source.ReleaseID || !strings.Contains(report.Message, "stored-header annotations for 1 scoring file(s)") {
 		t.Fatalf("update did not publish annotations: %+v", report)
 	}
 	if counter.count("/root/pgs_scores_list.txt") != 1 || counter.count("/root/metadata/pgs_all_metadata_scores.csv") != 1 {

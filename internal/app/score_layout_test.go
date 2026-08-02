@@ -8,7 +8,7 @@ import (
 )
 
 func TestRequireCurrentScoreLayout(t *testing.T) {
-	pointer := model.Pointer{ReleaseID: "current", ScoreLayoutVersion: model.ScoreLayoutVersion}
+	pointer := model.Pointer{ReleaseID: "current", ManifestTSVKey: model.ManifestTSVKey("current"), ManifestTSVSHA256: strings.Repeat("0", 64), ScoreLayoutVersion: model.ScoreLayoutVersion}
 	entry := model.Entry{
 		ReleaseID:   pointer.ReleaseID,
 		PGSID:       "PGS000001",
@@ -37,8 +37,8 @@ func TestRequireCurrentScoreLayout(t *testing.T) {
 	}
 
 	entry.ScoreKey = model.ScoreKey(entry.PGSID, entry.GenomeBuild)
-	pointer.ManifestTSVKey = model.ManifestTSVKey(pointer.ReleaseID)
-	if err := requireCurrentScoreLayout(pointer, []model.Entry{entry}); err == nil || !strings.Contains(err.Error(), "incomplete manifest TSV identity") {
-		t.Fatalf("incomplete manifest TSV identity was accepted: %v", err)
+	pointer.ManifestTSVSHA256 = ""
+	if err := requireCurrentScoreLayout(pointer, []model.Entry{entry}); err == nil || !strings.Contains(err.Error(), "missing its manifest TSV identity") {
+		t.Fatalf("missing manifest TSV identity was accepted: %v", err)
 	}
 }
