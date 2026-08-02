@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/carbocation/pgsc_mirror/internal/transfer"
 )
@@ -56,6 +57,7 @@ type ScoreMetadata struct {
 	TraitReported string
 	TraitMapped   string
 	TraitEFO      string
+	ReleaseDate   string
 	License       string
 }
 
@@ -121,6 +123,8 @@ func ParseMetadata(r io.Reader) (map[string]ScoreMetadata, error) {
 			columns["trait_mapped"] = i
 		case "trait_efo", "mapped trait(s) (efo id)":
 			columns["trait_efo"] = i
+		case "release_date", "release date":
+			columns["release_date"] = i
 		case "license", "license_name", "license/terms of use":
 			columns["license"] = i
 		}
@@ -128,6 +132,9 @@ func ParseMetadata(r io.Reader) (map[string]ScoreMetadata, error) {
 	idCol, ok := columns["pgs_id"]
 	if !ok {
 		return nil, errors.New("metadata CSV has no pgs_id column")
+	}
+	if _, ok := columns["release_date"]; !ok {
+		return nil, errors.New("metadata CSV has no release date column")
 	}
 	out := make(map[string]ScoreMetadata)
 	for {
@@ -152,11 +159,16 @@ func ParseMetadata(r io.Reader) (map[string]ScoreMetadata, error) {
 			}
 			return strings.TrimSpace(record[column])
 		}
+		releaseDate := value("release_date")
+		if _, err := time.Parse("2006-01-02", releaseDate); err != nil {
+			return nil, fmt.Errorf("metadata row %s has invalid release date %q", id, releaseDate)
+		}
 		out[id] = ScoreMetadata{
 			PGSName:       value("pgs_name"),
 			TraitReported: value("trait_reported"),
 			TraitMapped:   value("trait_mapped"),
 			TraitEFO:      value("trait_efo"),
+			ReleaseDate:   releaseDate,
 			License:       value("license"),
 		}
 	}

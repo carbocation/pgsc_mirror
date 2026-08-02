@@ -139,6 +139,9 @@ func (a *App) annotateCurrent(ctx context.Context, report AnnotationReport, writ
 	if err := requireSupportedAnnotations(pointer, entries); err != nil {
 		return report, err
 	}
+	if pointer.CatalogMetadataVersion != model.CatalogMetadataVersion {
+		return report, fmt.Errorf("catalog metadata version is %d, want %d; run reconcile", pointer.CatalogMetadataVersion, model.CatalogMetadataVersion)
+	}
 
 	if writable {
 		repairedTargets, err := a.convergeTargets(ctx, pointer, entries)

@@ -5,7 +5,7 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "release_id", "pgs_id", "genome_build", "source_url", "source_md5",
+    "release_id", "pgs_id", "release_date", "genome_build", "source_url", "source_md5",
     "size_bytes", "score_key", "first_seen_at", "last_seen_at", "status"
   ],
   "properties": {
@@ -15,6 +15,7 @@
     "trait_reported": {"type": "string"},
     "trait_mapped": {"type": "string"},
     "trait_efo": {"type": "string"},
+    "release_date": {"type": "string", "format": "date"},
     "genome_build": {"const": "GRCh38"},
     "source_url": {"type": "string", "format": "uri"},
     "source_md5": {"type": "string", "pattern": "^[0-9a-f]{32}$"},

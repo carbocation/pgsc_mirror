@@ -435,19 +435,27 @@ func observedHeaderInspectorVersion(entries []model.Entry) int {
 
 func observedCatalogMetadataVersion(entries []model.Entry) int {
 	found := false
+	phenotypesPresent := true
+	releaseDatesPresent := true
 	for i := range entries {
 		if entries[i].Status != model.StatusReady {
 			continue
 		}
 		found = true
 		if entries[i].PGSName == "" && entries[i].TraitReported == "" && entries[i].TraitMapped == "" && entries[i].TraitEFO == "" {
-			return 0
+			phenotypesPresent = false
+		}
+		if entries[i].ReleaseDate == "" {
+			releaseDatesPresent = false
 		}
 	}
-	if found {
+	if !found || !phenotypesPresent {
+		return 0
+	}
+	if releaseDatesPresent {
 		return model.CatalogMetadataVersion
 	}
-	return 0
+	return 1
 }
 
 func objectSHA256(ctx context.Context, st store.Store, key string) (string, error) {

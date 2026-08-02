@@ -365,7 +365,7 @@ func (a *App) inventory(ctx context.Context, previous []model.Entry, allowLimit,
 					}
 					return
 				}
-				e := model.Entry{PGSID: id, PGSName: metadata.PGSName, TraitReported: metadata.TraitReported, TraitMapped: metadata.TraitMapped, TraitEFO: metadata.TraitEFO, GenomeBuild: a.Config.GenomeBuild, SourceURL: sourceURL, SourceMD5: sum, ScoreKey: model.ScoreKey(id, a.Config.GenomeBuild), FirstSeenAt: first, LastSeenAt: now, Status: model.StatusReady, License: metadata.License}
+				e := model.Entry{PGSID: id, PGSName: metadata.PGSName, TraitReported: metadata.TraitReported, TraitMapped: metadata.TraitMapped, TraitEFO: metadata.TraitEFO, ReleaseDate: metadata.ReleaseDate, GenomeBuild: a.Config.GenomeBuild, SourceURL: sourceURL, SourceMD5: sum, ScoreKey: model.ScoreKey(id, a.Config.GenomeBuild), FirstSeenAt: first, LastSeenAt: now, Status: model.StatusReady, License: metadata.License}
 				if prior, ok := old[id]; ok {
 					e.FirstSeenAt = prior.FirstSeenAt
 					if prior.SourceMD5 == sum {
@@ -405,6 +405,14 @@ func (a *App) inventory(ctx context.Context, previous []model.Entry, allowLimit,
 	if !truncated {
 		for _, prior := range previous {
 			if _, ok := active[prior.PGSID]; !ok {
+				if metadata, ok := scoreMetadata[prior.PGSID]; ok {
+					prior.PGSName = metadata.PGSName
+					prior.TraitReported = metadata.TraitReported
+					prior.TraitMapped = metadata.TraitMapped
+					prior.TraitEFO = metadata.TraitEFO
+					prior.ReleaseDate = metadata.ReleaseDate
+					prior.License = metadata.License
+				}
 				prior.Status = model.StatusGone
 				entries = append(entries, prior)
 			}
@@ -537,7 +545,8 @@ func (a *App) reconcile(ctx context.Context, command string) (report RunReport, 
 	if err != nil {
 		return report, err
 	}
-	if !planner.HasChanges(changes) && !metadataChanged && !scoreListChanged && headerInspections == 0 {
+	catalogContractChanged := p.ReleaseID != "" && p.CatalogMetadataVersion != model.CatalogMetadataVersion
+	if !planner.HasChanges(changes) && !metadataChanged && !scoreListChanged && headerInspections == 0 && !catalogContractChanged {
 		if err := a.recordSentinels(ctx, inv); err != nil {
 			return report, err
 		}
@@ -685,6 +694,13 @@ func (a *App) Update(ctx context.Context, dryRun bool) (report RunReport, runErr
 		if err := requireSupportedAnnotations(pointer, nil); err != nil {
 			return report, err
 		}
+		if pointer.CatalogMetadataVersion < model.CatalogMetadataVersion {
+			if err := a.State.FinishRun(ctx, checkRun, nil); err != nil {
+				return report, err
+			}
+			finishCheck = false
+			return a.reconcile(ctx, "update")
+		}
 		if pointer.HeaderInspectorVersion < scoreheader.InspectorVersion {
 			annotation, err = a.Annotate(ctx, false)
 			if err != nil {
@@ -754,8 +770,8 @@ func requireSupportedAnnotations(pointer model.Pointer, entries []model.Entry) e
 	if pointer.HeaderInspectorVersion > scoreheader.InspectorVersion {
 		return fmt.Errorf("published header inspector version %d is newer than this binary's version %d; upgrade pgsc-mirror before publishing", pointer.HeaderInspectorVersion, scoreheader.InspectorVersion)
 	}
-	if pointer.ReleaseID != "" && pointer.CatalogMetadataVersion != model.CatalogMetadataVersion {
-		return fmt.Errorf("published catalog metadata version is %d, but this binary requires %d", pointer.CatalogMetadataVersion, model.CatalogMetadataVersion)
+	if pointer.CatalogMetadataVersion > model.CatalogMetadataVersion {
+		return fmt.Errorf("published catalog metadata version %d is newer than this binary's version %d; upgrade pgsc-mirror before publishing", pointer.CatalogMetadataVersion, model.CatalogMetadataVersion)
 	}
 	for i := range entries {
 		if entries[i].Status == model.StatusReady && entries[i].Header != nil && entries[i].Header.InspectorVersion > scoreheader.InspectorVersion {

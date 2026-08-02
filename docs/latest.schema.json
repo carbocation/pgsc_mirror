@@ -23,6 +23,6 @@
     "genome_build": {"const": "GRCh38"},
     "score_layout_version": {"const": 1},
     "header_inspector_version": {"type": "integer", "minimum": 1},
-    "catalog_metadata_version": {"type": "integer", "minimum": 1}
+    "catalog_metadata_version": {"const": 2}
   }
 }

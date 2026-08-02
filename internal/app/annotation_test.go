@@ -43,6 +43,7 @@ func seedUnannotatedRelease(t *testing.T, a *App, now time.Time, fixtures ...ann
 			TraitReported: "reported-" + fixture.PGSID,
 			TraitMapped:   "mapped-" + fixture.PGSID,
 			TraitEFO:      "EFO_" + strings.TrimPrefix(fixture.PGSID, "PGS"),
+			ReleaseDate:   "2020-01-02",
 			GenomeBuild:   "GRCh38",
 			SourceURL:     "https://upstream.invalid/" + fixture.PGSID + ".txt.gz",
 			SourceMD5:     sum,
@@ -63,11 +64,11 @@ func seedUnannotatedRelease(t *testing.T, a *App, now time.Time, fixtures ...ann
 		t.Fatal(err)
 	}
 	scoreList := make([]byte, 0)
-	metadata := []byte("Polygenic Score (PGS) ID,PGS Name,Reported Trait,Mapped Trait(s) (EFO label),Mapped Trait(s) (EFO ID),License/Terms of Use\n")
+	metadata := []byte("Polygenic Score (PGS) ID,PGS Name,Reported Trait,Mapped Trait(s) (EFO label),Mapped Trait(s) (EFO ID),Release Date,License/Terms of Use\n")
 	for _, fixture := range fixtures {
 		scoreList = append(scoreList, fixture.PGSID...)
 		scoreList = append(scoreList, '\n')
-		metadata = append(metadata, []byte(fmt.Sprintf("%s,name-%s,reported-%s,mapped-%s,EFO_%s,test\n", fixture.PGSID, fixture.PGSID, fixture.PGSID, fixture.PGSID, strings.TrimPrefix(fixture.PGSID, "PGS")))...)
+		metadata = append(metadata, []byte(fmt.Sprintf("%s,name-%s,reported-%s,mapped-%s,EFO_%s,2020-01-02,test\n", fixture.PGSID, fixture.PGSID, fixture.PGSID, fixture.PGSID, strings.TrimPrefix(fixture.PGSID, "PGS")))...)
 	}
 	scoreSum := sha256.Sum256(scoreList)
 	metadataSum := sha256.Sum256(metadata)
@@ -157,7 +158,7 @@ func TestAnnotateUsesOnlyStoredObjectsAndThenNoOps(t *testing.T) {
 	if pointer.HeaderInspectorVersion != scoreheader.InspectorVersion || len(entries) != 3 {
 		t.Fatalf("annotated release is incomplete: pointer=%+v entries=%+v", pointer, entries)
 	}
-	if pointer.CatalogMetadataVersion != model.CatalogMetadataVersion || entries[0].PGSName != "name-PGS000001" || entries[0].TraitReported != "reported-PGS000001" || entries[0].TraitMapped != "mapped-PGS000001" || entries[0].TraitEFO != "EFO_000001" {
+	if pointer.CatalogMetadataVersion != model.CatalogMetadataVersion || entries[0].PGSName != "name-PGS000001" || entries[0].TraitReported != "reported-PGS000001" || entries[0].TraitMapped != "mapped-PGS000001" || entries[0].TraitEFO != "EFO_000001" || entries[0].ReleaseDate != "2020-01-02" {
 		t.Fatalf("catalog phenotype metadata was not preserved: pointer=%+v entry=%+v", pointer, entries[0])
 	}
 	for _, entry := range entries {
@@ -343,7 +344,7 @@ func TestAnnotateRejectsNewerAnnotationVersionWithoutUpstreamAccess(t *testing.T
 }
 
 func TestAnnotateRequiresExactCatalogMetadataVersionWithoutUpstreamAccess(t *testing.T) {
-	for name, version := range map[string]int{"outdated": 0, "newer": model.CatalogMetadataVersion + 1} {
+	for name, version := range map[string]int{"outdated": model.CatalogMetadataVersion - 1, "newer": model.CatalogMetadataVersion + 1} {
 		t.Run(name, func(t *testing.T) {
 			var upstreamRequests atomic.Int64
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -368,6 +369,46 @@ func TestAnnotateRequiresExactCatalogMetadataVersionWithoutUpstreamAccess(t *tes
 				t.Fatalf("version rejection made %d upstream request(s)", upstreamRequests.Load())
 			}
 		})
+	}
+}
+
+func TestUpdateReconcilesOutdatedCatalogMetadataContract(t *testing.T) {
+	up := newSyntheticUpstream()
+	up.set("PGS000001", harmonizedHeaderFixture, "CC0", true)
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	a, err := New(context.Background(), integrationConfig(t.TempDir(), srv.URL), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+	a.now = func() time.Time { return now }
+	initial, err := a.Reconcile(context.Background(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pointer, _, err := a.readPointer(context.Background(), a.targets[0].Store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pointer.CatalogMetadataVersion = model.CatalogMetadataVersion - 1
+	replaceLatestPointer(t, a, pointer)
+	a.now = func() time.Time { return now.Add(time.Minute) }
+
+	report, err := a.Update(context.Background(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Changed || report.ReleaseID == "" || report.ReleaseID == initial.ReleaseID {
+		t.Fatalf("catalog contract upgrade did not publish a successor: %+v", report)
+	}
+	current, entries, err := a.latest(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.CatalogMetadataVersion != model.CatalogMetadataVersion || len(entries) != 1 || entries[0].ReleaseDate != "2020-01-02" {
+		t.Fatalf("successor lacks current catalog metadata: pointer=%+v entries=%+v", current, entries)
 	}
 }
 
@@ -480,7 +521,7 @@ func TestUpdateAnnotatesBeforeLightweightUpstreamCheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pointer.HeaderInspectorVersion != scoreheader.InspectorVersion || pointer.CatalogMetadataVersion != model.CatalogMetadataVersion || entries[0].Header == nil || entries[0].PGSName != "name-PGS000001" || entries[0].TraitReported != "reported-PGS000001" || entries[0].TraitMapped != "mapped-PGS000001" || entries[0].TraitEFO != "EFO_000001" {
+	if pointer.HeaderInspectorVersion != scoreheader.InspectorVersion || pointer.CatalogMetadataVersion != model.CatalogMetadataVersion || entries[0].Header == nil || entries[0].PGSName != "name-PGS000001" || entries[0].TraitReported != "reported-PGS000001" || entries[0].TraitMapped != "mapped-PGS000001" || entries[0].TraitEFO != "EFO_000001" || entries[0].ReleaseDate != "2020-01-02" {
 		t.Fatalf("updated release lacks annotations: pointer=%+v entries=%+v", pointer, entries)
 	}
 }

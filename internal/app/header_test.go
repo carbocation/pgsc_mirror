@@ -72,6 +72,7 @@ func TestUpdateAnnotatesOutdatedManifestHeader(t *testing.T) {
 		TraitReported: "reported-PGS000001",
 		TraitMapped:   "mapped-PGS000001",
 		TraitEFO:      "EFO_000001",
+		ReleaseDate:   "2020-01-02",
 		GenomeBuild:   "GRCh38",
 		SourceURL:     srv.URL + "/root/scores/PGS000001/ScoringFiles/Harmonized/PGS000001_hmPOS_GRCh38.txt.gz",
 		SourceMD5:     sum,
@@ -95,7 +96,7 @@ func TestUpdateAnnotatesOutdatedManifestHeader(t *testing.T) {
 		t.Fatal(err)
 	}
 	scoreList := []byte("PGS000001\n")
-	metadata := []byte("pgs_id,license,note\nPGS000001,CC0,\n")
+	metadata := []byte("pgs_id,release_date,license,note\nPGS000001,2020-01-02,CC0,\n")
 	if err := a.publish(ctx, pointer, scoreList, metadata, manifestBytes, manifestTSV); err != nil {
 		t.Fatal(err)
 	}

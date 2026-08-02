@@ -10,31 +10,32 @@ Columns, in order:
 4. `trait_reported`
 5. `trait_mapped`
 6. `trait_efo`
-7. `genome_build`
-8. `status`
-9. `score_key`
-10. `gcs_generation`
-11. `source_md5`
-12. `size_bytes`
-13. `source_url`
-14. `upstream_etag`
-15. `upstream_last_modified`
-16. `first_seen_at`
-17. `last_seen_at`
-18. `license`
-19. `header_inspector_version`
-20. `header_status`
-21. `header_type`
-22. `header_format_version`
-23. `header_delimiter`
-24. `header_schema_sha256`
-25. `header_columns_json`
-26. `header_metadata_keys_json`
-27. `header_sections_json`
-28. `header_comment_lines`
-29. `header_warnings_json`
-30. `header_error`
+7. `release_date`
+8. `genome_build`
+9. `status`
+10. `score_key`
+11. `gcs_generation`
+12. `source_md5`
+13. `size_bytes`
+14. `source_url`
+15. `upstream_etag`
+16. `upstream_last_modified`
+17. `first_seen_at`
+18. `last_seen_at`
+19. `license`
+20. `header_inspector_version`
+21. `header_status`
+22. `header_type`
+23. `header_format_version`
+24. `header_delimiter`
+25. `header_schema_sha256`
+26. `header_columns_json`
+27. `header_metadata_keys_json`
+28. `header_sections_json`
+29. `header_comment_lines`
+30. `header_warnings_json`
+31. `header_error`
 
-`pgs_name`, `trait_reported`, `trait_mapped`, and `trait_efo` come from the release's preserved PGS Catalog metadata snapshot. Multiple mapped traits and identifiers retain the upstream delimiter and order. The four `*_json` columns contain JSON arrays so nested header observations remain lossless. Header columns are empty when no inspection is recorded. Timestamps use RFC 3339 with nanosecond precision when present.
+`pgs_name`, `trait_reported`, `trait_mapped`, `trait_efo`, and `release_date` come from the release's preserved PGS Catalog metadata snapshot. `release_date` is the catalog's per-score release date in `YYYY-MM-DD` form; the mirror release timestamp remains `LATEST.json.published_at`. Multiple mapped traits and identifiers retain the upstream delimiter and order. The four `*_json` columns contain JSON arrays so nested header observations remain lossless. Header columns are empty when no inspection is recorded. Timestamps use RFC 3339 with nanosecond precision when present.
 
 `LATEST.json` records `manifest_tsv_key` and `manifest_tsv_sha256`. Reproducible consumers should read that immutable key and verify its checksum. A reader using `LATEST.manifest.tsv` can compare the first column with `LATEST.json.release_id`; retry if they differ during recovery from an interrupted publication.

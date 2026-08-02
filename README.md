@@ -11,7 +11,7 @@ scores/PGS000002_hmPOS_GRCh38.txt.gz
 
 A basic consumer can periodically list `scores/` and checkpoint each object's name and GCS generation: a new name is a newly mirrored score, while a new generation of an existing name is an upstream revision. The release manifest is optional for this workflow. Consumers use it when they need an atomic snapshot, checksums, licensing, withdrawal status, or exact provenance.
 
-The current manifest is also available as a directly readable TSV. Each row includes the PGS name, reported trait, mapped trait labels, and mapped EFO/MONDO identifiers alongside the scoring-file provenance:
+The current manifest is also available as a directly readable TSV. Each row includes the PGS name, reported trait, mapped trait labels, mapped EFO/MONDO identifiers, and PGS Catalog release date alongside the scoring-file provenance:
 
 ```bash
 gcloud storage cat gs://BUCKET/PREFIX/LATEST.manifest.tsv | column -ts $'\t' | less -S

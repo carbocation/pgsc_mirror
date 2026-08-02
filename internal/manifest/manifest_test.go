@@ -68,7 +68,7 @@ func TestEncodeTSVIsDeterministicSortedAndComplete(t *testing.T) {
 	now := time.Date(2026, 7, 31, 12, 0, 0, 123, time.UTC)
 	entries := []model.Entry{
 		{ReleaseID: "release", PGSID: "PGS000002", GenomeBuild: "GRCh38", Status: model.StatusGone, ScoreKey: model.ScoreKey("PGS000002", "GRCh38"), SourceMD5: "22222222222222222222222222222222", FirstSeenAt: now, LastSeenAt: now},
-		{ReleaseID: "release", PGSID: "PGS000001", PGSName: "PRS77_BC", TraitReported: "Breast cancer", TraitMapped: "breast carcinoma", TraitEFO: "MONDO_0004989", GenomeBuild: "GRCh38", Status: model.StatusReady, ScoreKey: model.ScoreKey("PGS000001", "GRCh38"), SourceMD5: "11111111111111111111111111111111", FirstSeenAt: now, LastSeenAt: now, Header: &scoreheader.Inspection{InspectorVersion: scoreheader.InspectorVersion, Status: scoreheader.StatusRecognized, Type: scoreheader.TypeHarmonizedV2, Columns: []string{"effect_allele", "hm_chr"}}},
+		{ReleaseID: "release", PGSID: "PGS000001", PGSName: "PRS77_BC", TraitReported: "Breast cancer", TraitMapped: "breast carcinoma", TraitEFO: "MONDO_0004989", ReleaseDate: "2019-10-14", GenomeBuild: "GRCh38", Status: model.StatusReady, ScoreKey: model.ScoreKey("PGS000001", "GRCh38"), SourceMD5: "11111111111111111111111111111111", FirstSeenAt: now, LastSeenAt: now, Header: &scoreheader.Inspection{InspectorVersion: scoreheader.InspectorVersion, Status: scoreheader.StatusRecognized, Type: scoreheader.TypeHarmonizedV2, Columns: []string{"effect_allele", "hm_chr"}}},
 	}
 	first, firstSHA, err := EncodeTSV(entries)
 	if err != nil {
@@ -96,7 +96,10 @@ func TestEncodeTSVIsDeterministicSortedAndComplete(t *testing.T) {
 	if records[1][2] != "PRS77_BC" || records[1][3] != "Breast cancer" || records[1][4] != "breast carcinoma" || records[1][5] != "MONDO_0004989" {
 		t.Fatalf("phenotype metadata was not preserved: %v", records[1][2:6])
 	}
-	if records[1][24] != `["effect_allele","hm_chr"]` {
-		t.Fatalf("header columns were not preserved as JSON: %q", records[1][24])
+	if records[1][6] != "2019-10-14" {
+		t.Fatalf("release date was not preserved: %q", records[1][6])
+	}
+	if records[1][25] != `["effect_allele","hm_chr"]` {
+		t.Fatalf("header columns were not preserved as JSON: %q", records[1][25])
 	}
 }

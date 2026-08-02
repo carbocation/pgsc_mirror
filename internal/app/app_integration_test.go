@@ -148,9 +148,9 @@ func (u *syntheticUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("ETag", etag)
-		io.WriteString(w, "Polygenic Score (PGS) ID,PGS Name,Reported Trait,Mapped Trait(s) (EFO label),Mapped Trait(s) (EFO ID),License/Terms of Use,note\n")
+		io.WriteString(w, "Polygenic Score (PGS) ID,PGS Name,Reported Trait,Mapped Trait(s) (EFO label),Mapped Trait(s) (EFO ID),Release Date,License/Terms of Use,note\n")
 		for _, id := range ids {
-			fmt.Fprintf(w, "%s,name-%s,reported-%s,mapped-%s,EFO_%s,%s,%s\n", id, id, id, id, strings.TrimPrefix(id, "PGS"), u.licenses[id], u.note)
+			fmt.Fprintf(w, "%s,name-%s,reported-%s,mapped-%s,EFO_%s,2020-01-02,%s,%s\n", id, id, id, id, strings.TrimPrefix(id, "PGS"), u.licenses[id], u.note)
 		}
 		return
 	}
@@ -231,7 +231,7 @@ func TestReconcileLifecycleAndRecovery(t *testing.T) {
 	if pointer.ManifestTSVKey != model.ManifestTSVKey(initial) || pointer.ManifestTSVSHA256 == "" {
 		t.Fatalf("LATEST does not pin the release manifest TSV: %+v", pointer)
 	}
-	if pointer.CatalogMetadataVersion != model.CatalogMetadataVersion || len(initialEntries) != 1 || initialEntries[0].PGSName != "name-PGS000001" || initialEntries[0].TraitReported != "reported-PGS000001" || initialEntries[0].TraitMapped != "mapped-PGS000001" || initialEntries[0].TraitEFO != "EFO_000001" {
+	if pointer.CatalogMetadataVersion != model.CatalogMetadataVersion || len(initialEntries) != 1 || initialEntries[0].PGSName != "name-PGS000001" || initialEntries[0].TraitReported != "reported-PGS000001" || initialEntries[0].TraitMapped != "mapped-PGS000001" || initialEntries[0].TraitEFO != "EFO_000001" || initialEntries[0].ReleaseDate != "2020-01-02" {
 		t.Fatalf("release does not contain catalog phenotype metadata: pointer=%+v entries=%+v", pointer, initialEntries)
 	}
 	releaseTSV, _, err := a.targets[0].Open(ctx, pointer.ManifestTSVKey)

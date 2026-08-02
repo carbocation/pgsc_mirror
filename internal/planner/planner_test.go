@@ -25,3 +25,12 @@ func TestPlanTransitions(t *testing.T) {
 		}
 	}
 }
+
+func TestPlanTreatsReleaseDateChangeAsMetadata(t *testing.T) {
+	old := []model.Entry{{PGSID: "PGS000001", SourceMD5: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Status: model.StatusReady, ReleaseDate: "2019-10-14"}}
+	desired := []model.Entry{{PGSID: "PGS000001", SourceMD5: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Status: model.StatusReady, ReleaseDate: "2020-01-02"}}
+	changes := Plan(old, desired)
+	if len(changes) != 1 || changes[0].Kind != Metadata {
+		t.Fatalf("release date change was not metadata: %+v", changes)
+	}
+}
