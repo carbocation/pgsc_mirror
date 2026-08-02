@@ -41,6 +41,10 @@ func (a *App) Verify(ctx context.Context, sample int) (VerifyReport, error) {
 			failed = true
 			continue
 		}
+		if p.CatalogMetadataVersion != model.CatalogMetadataVersion {
+			result.Failures = append(result.Failures, fmt.Sprintf("catalog metadata version is %d, want %d", p.CatalogMetadataVersion, model.CatalogMetadataVersion))
+			failed = true
+		}
 		expectedPointer, _, err := attachManifestTSV(p, entries)
 		if err != nil {
 			result.Failures = append(result.Failures, "manifest TSV: "+err.Error())
@@ -162,6 +166,9 @@ func (a *App) Pull(ctx context.Context, dryRun bool) (RunReport, error) {
 	entries, manifestBytes, err := a.readManifest(ctx, source.Store, p)
 	if err != nil {
 		return RunReport{}, err
+	}
+	if p.CatalogMetadataVersion != model.CatalogMetadataVersion {
+		return RunReport{}, errors.New("source release does not publish the catalog phenotype metadata contract; run update against GCS first")
 	}
 	expectedPointer, manifestTSV, err := attachManifestTSV(p, entries)
 	if err != nil {
@@ -345,6 +352,9 @@ func (a *App) RebuildState(ctx context.Context, dryRun bool) (RunReport, error) 
 	if latest.ManifestTSVKey != expectedLatest.ManifestTSVKey || latest.ManifestTSVSHA256 != expectedLatest.ManifestTSVSHA256 {
 		return RunReport{}, errors.New("current release does not publish the manifest TSV contract; run update first")
 	}
+	if latest.CatalogMetadataVersion != model.CatalogMetadataVersion {
+		return RunReport{}, errors.New("current release does not publish the catalog phenotype metadata contract; run update first")
+	}
 	objects, err := t.List(ctx, "releases")
 	if err != nil {
 		return RunReport{}, err
@@ -385,7 +395,7 @@ func (a *App) RebuildState(ctx context.Context, dryRun bool) (RunReport, error) 
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return RunReport{}, err
 		}
-		p := model.Pointer{ReleaseID: id, ManifestKey: obj.Key, ManifestSHA256: hex.EncodeToString(sum[:]), ScoreListSHA256: scoreSHA, MetadataSHA256: metadataSHA, PublishedAt: published, EntryCount: len(entries), GenomeBuild: a.Config.GenomeBuild, HeaderInspectorVersion: observedHeaderInspectorVersion(entries), ScoreLayoutVersion: model.ScoreLayoutVersion}
+		p := model.Pointer{ReleaseID: id, ManifestKey: obj.Key, ManifestSHA256: hex.EncodeToString(sum[:]), ScoreListSHA256: scoreSHA, MetadataSHA256: metadataSHA, PublishedAt: published, EntryCount: len(entries), GenomeBuild: a.Config.GenomeBuild, HeaderInspectorVersion: observedHeaderInspectorVersion(entries), CatalogMetadataVersion: observedCatalogMetadataVersion(entries), ScoreLayoutVersion: model.ScoreLayoutVersion}
 		if err := requireCurrentScoreLayout(p, entries); err != nil {
 			continue
 		}
@@ -445,6 +455,23 @@ func observedHeaderInspectorVersion(entries []model.Entry) int {
 		}
 	}
 	return version
+}
+
+func observedCatalogMetadataVersion(entries []model.Entry) int {
+	found := false
+	for i := range entries {
+		if entries[i].Status != model.StatusReady {
+			continue
+		}
+		found = true
+		if entries[i].PGSName == "" && entries[i].TraitReported == "" && entries[i].TraitMapped == "" && entries[i].TraitEFO == "" {
+			return 0
+		}
+	}
+	if found {
+		return model.CatalogMetadataVersion
+	}
+	return 0
 }
 
 func objectSHA256(ctx context.Context, st store.Store, key string) (string, error) {

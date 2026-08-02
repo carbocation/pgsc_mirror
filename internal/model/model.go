@@ -15,6 +15,9 @@ const (
 	MaintenanceKey       = "operations/maintenance.json"
 	StatusReady          = "available"
 	StatusGone           = "withdrawn"
+	// CatalogMetadataVersion identifies the descriptive PGS name and phenotype
+	// fields materialized from the preserved catalog metadata snapshot.
+	CatalogMetadataVersion = 1
 	// ScoreLayoutVersion identifies the flat, source-named scoring-file layout.
 	ScoreLayoutVersion = 1
 )
@@ -22,6 +25,10 @@ const (
 type Entry struct {
 	ReleaseID            string                  `json:"release_id"`
 	PGSID                string                  `json:"pgs_id"`
+	PGSName              string                  `json:"pgs_name,omitempty"`
+	TraitReported        string                  `json:"trait_reported,omitempty"`
+	TraitMapped          string                  `json:"trait_mapped,omitempty"`
+	TraitEFO             string                  `json:"trait_efo,omitempty"`
 	GenomeBuild          string                  `json:"genome_build"`
 	SourceURL            string                  `json:"source_url"`
 	SourceMD5            string                  `json:"source_md5"`
@@ -49,6 +56,7 @@ type Pointer struct {
 	EntryCount             int       `json:"entry_count"`
 	GenomeBuild            string    `json:"genome_build"`
 	HeaderInspectorVersion int       `json:"header_inspector_version,omitempty"`
+	CatalogMetadataVersion int       `json:"catalog_metadata_version,omitempty"`
 	ScoreLayoutVersion     int       `json:"score_layout_version,omitempty"`
 }
 

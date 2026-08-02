@@ -59,11 +59,11 @@ func seedLegacyRelease(t *testing.T, a *App, now time.Time, fixtures ...annotati
 		t.Fatal(err)
 	}
 	scoreList := make([]byte, 0)
-	metadata := []byte("pgs_id,license,note\n")
+	metadata := []byte("Polygenic Score (PGS) ID,PGS Name,Reported Trait,Mapped Trait(s) (EFO label),Mapped Trait(s) (EFO ID),License/Terms of Use\n")
 	for _, fixture := range fixtures {
 		scoreList = append(scoreList, fixture.PGSID...)
 		scoreList = append(scoreList, '\n')
-		metadata = append(metadata, []byte(fmt.Sprintf("%s,test,\n", fixture.PGSID))...)
+		metadata = append(metadata, []byte(fmt.Sprintf("%s,name-%s,reported-%s,mapped-%s,EFO_%s,test\n", fixture.PGSID, fixture.PGSID, fixture.PGSID, fixture.PGSID, strings.TrimPrefix(fixture.PGSID, "PGS")))...)
 	}
 	scoreSum := sha256.Sum256(scoreList)
 	metadataSum := sha256.Sum256(metadata)
@@ -151,6 +151,9 @@ func TestAnnotateUsesOnlyStoredObjectsAndThenNoOps(t *testing.T) {
 	}
 	if pointer.HeaderInspectorVersion != scoreheader.InspectorVersion || len(entries) != 3 {
 		t.Fatalf("annotated release is incomplete: pointer=%+v entries=%+v", pointer, entries)
+	}
+	if pointer.CatalogMetadataVersion != model.CatalogMetadataVersion || report.CatalogMetadataUpdated != 3 || entries[0].PGSName != "name-PGS000001" || entries[0].TraitReported != "reported-PGS000001" || entries[0].TraitMapped != "mapped-PGS000001" || entries[0].TraitEFO != "EFO_000001" {
+		t.Fatalf("catalog phenotype metadata was not annotated: pointer=%+v report=%+v entry=%+v", pointer, report, entries[0])
 	}
 	for _, entry := range entries {
 		if entry.Header == nil || !entry.Header.Current() {
@@ -334,6 +337,31 @@ func TestAnnotateRejectsNewerAnnotationVersionWithoutUpstreamAccess(t *testing.T
 	}
 }
 
+func TestAnnotateRejectsNewerCatalogMetadataVersionWithoutUpstreamAccess(t *testing.T) {
+	var upstreamRequests atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamRequests.Add(1)
+		http.Error(w, "upstream must not be contacted", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	a, err := New(context.Background(), integrationConfig(t.TempDir(), srv.URL), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+	pointer := seedLegacyRelease(t, a, now, annotationFixture{PGSID: "PGS000001", Data: gzipFixture(harmonizedHeaderFixture)})
+	pointer.CatalogMetadataVersion = model.CatalogMetadataVersion + 1
+	replaceLatestPointer(t, a, pointer)
+
+	if _, err := a.Annotate(context.Background(), false); err == nil {
+		t.Fatal("annotation accepted a newer catalog metadata version")
+	}
+	if upstreamRequests.Load() != 0 {
+		t.Fatalf("version rejection made %d upstream request(s)", upstreamRequests.Load())
+	}
+}
+
 func TestAnnotateRejectsCorruptStoredSnapshotWithoutAdvancingPointer(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	defer srv.Close()
@@ -428,7 +456,7 @@ func TestUpdateAnnotatesBeforeLightweightUpstreamCheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !report.Changed || report.ReleaseID == legacy.ReleaseID {
+	if !report.Changed || report.ReleaseID == legacy.ReleaseID || !strings.Contains(report.Message, "catalog phenotype metadata for 1 score(s)") {
 		t.Fatalf("update did not publish annotations: %+v", report)
 	}
 	if counter.count("/root/pgs_scores_list.txt") != 1 || counter.count("/root/metadata/pgs_all_metadata_scores.csv") != 1 {
@@ -443,7 +471,7 @@ func TestUpdateAnnotatesBeforeLightweightUpstreamCheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pointer.HeaderInspectorVersion != scoreheader.InspectorVersion || entries[0].Header == nil {
+	if pointer.HeaderInspectorVersion != scoreheader.InspectorVersion || pointer.CatalogMetadataVersion != model.CatalogMetadataVersion || entries[0].Header == nil || entries[0].PGSName != "name-PGS000001" || entries[0].TraitReported != "reported-PGS000001" || entries[0].TraitMapped != "mapped-PGS000001" || entries[0].TraitEFO != "EFO_000001" {
 		t.Fatalf("updated release lacks annotations: pointer=%+v entries=%+v", pointer, entries)
 	}
 }

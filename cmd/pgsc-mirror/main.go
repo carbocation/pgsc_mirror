@@ -327,8 +327,8 @@ func printHuman(w io.Writer, v any) {
 		if r.ReleaseID != "" {
 			fmt.Fprintln(w, "release:", r.ReleaseID)
 		}
-		fmt.Fprintf(w, "available=%d inspected=%d updated=%d unchanged=%d recognized=%d unrecognized=%d unreadable=%d failed=%d\n",
-			r.Available, r.Inspected, r.Updated, r.Unchanged, r.Recognized, r.Unrecognized, r.Unreadable, r.Failed)
+		fmt.Fprintf(w, "available=%d inspected=%d header_updated=%d catalog_metadata_updated=%d unchanged=%d recognized=%d unrecognized=%d unreadable=%d failed=%d\n",
+			r.Available, r.Inspected, r.Updated, r.CatalogMetadataUpdated, r.Unchanged, r.Recognized, r.Unrecognized, r.Unreadable, r.Failed)
 		if len(r.Anomalies) > 0 {
 			fmt.Fprintf(w, "header anomalies (%d):\n", len(r.Anomalies))
 			for _, anomaly := range r.Anomalies {

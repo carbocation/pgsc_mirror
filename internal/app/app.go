@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -56,11 +57,37 @@ type PlanReport struct {
 }
 
 type RunReport struct {
-	Command   string      `json:"command"`
-	ReleaseID string      `json:"release_id,omitempty"`
-	Changed   bool        `json:"changed"`
-	Message   string      `json:"message"`
-	Plan      *PlanReport `json:"plan,omitempty"`
+	Command   string        `json:"command"`
+	ReleaseID string        `json:"release_id,omitempty"`
+	Changed   bool          `json:"changed"`
+	Message   string        `json:"message"`
+	Plan      *PlanReport   `json:"plan,omitempty"`
+	Repair    *RepairReport `json:"repair,omitempty"`
+}
+
+type RepairReport struct {
+	SynchronizedTargets int  `json:"synchronized_targets"`
+	ManifestTSVTargets  int  `json:"manifest_tsv_targets"`
+	ManifestTSVBackfill bool `json:"manifest_tsv_backfill"`
+}
+
+func (r RepairReport) Changed() bool {
+	return r.SynchronizedTargets > 0 || r.ManifestTSVTargets > 0
+}
+
+func (r RepairReport) Description() string {
+	var parts []string
+	if r.ManifestTSVTargets > 0 {
+		action := "repaired TSV manifest publication on"
+		if r.ManifestTSVBackfill {
+			action = "backfilled TSV manifest on"
+		}
+		parts = append(parts, fmt.Sprintf("%s %d configured target(s)", action, r.ManifestTSVTargets))
+	}
+	if r.SynchronizedTargets > 0 {
+		parts = append(parts, fmt.Sprintf("synchronized %d lagging secondary target(s)", r.SynchronizedTargets))
+	}
+	return strings.Join(parts, "; ")
 }
 
 type VerifyTarget struct {
@@ -263,7 +290,7 @@ func (a *App) inventory(ctx context.Context, previous []model.Entry, allowLimit,
 	if err != nil {
 		return inventory{}, fmt.Errorf("fetch score list: %w", err)
 	}
-	metadataDoc, licenses, err := a.Catalog.Metadata(ctx, "", "")
+	metadataDoc, scoreMetadata, err := a.Catalog.Metadata(ctx, "", "")
 	if err != nil {
 		return inventory{}, fmt.Errorf("fetch metadata: %w", err)
 	}
@@ -329,7 +356,16 @@ func (a *App) inventory(ctx context.Context, previous []model.Entry, allowLimit,
 					return
 				}
 				first := now
-				e := model.Entry{PGSID: id, GenomeBuild: a.Config.GenomeBuild, SourceURL: sourceURL, SourceMD5: sum, ScoreKey: model.ScoreKey(id, a.Config.GenomeBuild), FirstSeenAt: first, LastSeenAt: now, Status: model.StatusReady, License: licenses[id]}
+				metadata, ok := scoreMetadata[id]
+				if !ok {
+					select {
+					case errCh <- fmt.Errorf("metadata row %s was not found", id):
+						cancel()
+					default:
+					}
+					return
+				}
+				e := model.Entry{PGSID: id, PGSName: metadata.PGSName, TraitReported: metadata.TraitReported, TraitMapped: metadata.TraitMapped, TraitEFO: metadata.TraitEFO, GenomeBuild: a.Config.GenomeBuild, SourceURL: sourceURL, SourceMD5: sum, ScoreKey: model.ScoreKey(id, a.Config.GenomeBuild), FirstSeenAt: first, LastSeenAt: now, Status: model.StatusReady, License: metadata.License}
 				if prior, ok := old[id]; ok {
 					e.FirstSeenAt = prior.FirstSeenAt
 					if prior.SourceMD5 == sum {
@@ -462,17 +498,26 @@ func (a *App) reconcile(ctx context.Context, command string) (report RunReport, 
 	if err := requireSupportedAnnotations(p, previous); err != nil {
 		return report, err
 	}
-	repairedTargets, err := a.convergeTargets(ctx, p, previous)
+	repairedTargetCount, err := a.convergeTargets(ctx, p, previous)
 	if err != nil {
 		return report, err
 	}
+	repair := RepairReport{SynchronizedTargets: repairedTargetCount}
 	if p.ReleaseID != "" {
+		manifestTargets, err := a.manifestTSVTargetsNeedingRepair(ctx, p, previous)
+		if err != nil {
+			return report, err
+		}
+		manifestBackfill := p.ManifestTSVKey == "" && p.ManifestTSVSHA256 == ""
 		var manifestTSVChanged bool
 		p, manifestTSVChanged, err = a.ensureManifestTSV(ctx, p, previous)
 		if err != nil {
 			return report, err
 		}
-		repairedTargets = repairedTargets || manifestTSVChanged
+		if manifestTSVChanged {
+			repair.ManifestTSVTargets = manifestTargets
+			repair.ManifestTSVBackfill = manifestBackfill
+		}
 	}
 	if err := a.catchUpState(ctx, p, previous); err != nil {
 		return report, err
@@ -505,9 +550,10 @@ func (a *App) reconcile(ctx context.Context, command string) (report RunReport, 
 			return report, err
 		}
 		report.ReleaseID = p.ReleaseID
-		report.Changed = repairedTargets
-		if repairedTargets {
-			report.Message = "repaired lagging targets; upstream checksums and metadata match the latest release"
+		report.Changed = repair.Changed()
+		if repair.Changed() {
+			report.Repair = &repair
+			report.Message = repair.Description() + "; upstream checksums and metadata match the latest release"
 		} else {
 			report.Message = "upstream checksums and metadata match the latest release"
 		}
@@ -530,7 +576,7 @@ func (a *App) reconcile(ctx context.Context, command string) (report RunReport, 
 	}
 	scoreSum := sha256.Sum256(inv.scoreDoc.Body)
 	metadataSum := sha256.Sum256(inv.metadata)
-	pointer := model.Pointer{ReleaseID: releaseID, ManifestKey: model.ManifestKey(releaseID), ManifestSHA256: manifestSHA, ScoreListSHA256: hex.EncodeToString(scoreSum[:]), MetadataSHA256: hex.EncodeToString(metadataSum[:]), PublishedAt: now, EntryCount: len(inv.entries), GenomeBuild: a.Config.GenomeBuild, HeaderInspectorVersion: scoreheader.InspectorVersion, ScoreLayoutVersion: model.ScoreLayoutVersion}
+	pointer := model.Pointer{ReleaseID: releaseID, ManifestKey: model.ManifestKey(releaseID), ManifestSHA256: manifestSHA, ScoreListSHA256: hex.EncodeToString(scoreSum[:]), MetadataSHA256: hex.EncodeToString(metadataSum[:]), PublishedAt: now, EntryCount: len(inv.entries), GenomeBuild: a.Config.GenomeBuild, HeaderInspectorVersion: scoreheader.InspectorVersion, CatalogMetadataVersion: model.CatalogMetadataVersion, ScoreLayoutVersion: model.ScoreLayoutVersion}
 	pointer, manifestTSV, err := attachManifestTSV(pointer, inv.entries)
 	if err != nil {
 		return report, err
@@ -553,6 +599,10 @@ func (a *App) reconcile(ctx context.Context, command string) (report RunReport, 
 	report.ReleaseID = releaseID
 	report.Changed = true
 	report.Message = "published complete immutable release"
+	if repair.Changed() {
+		report.Repair = &repair
+		report.Message += "; " + repair.Description()
+	}
 	return report, nil
 }
 
@@ -613,10 +663,11 @@ func (a *App) Update(ctx context.Context, dryRun bool) (report RunReport, runErr
 	if _, err := a.restoreMaintenanceCheckpoint(ctx); err != nil {
 		return report, fmt.Errorf("restore shared maintenance state: %w", err)
 	}
-	repairedTargets, err := a.repairLaggingTargets(ctx)
+	repair, err := a.repairLaggingTargets(ctx)
 	if err != nil {
 		return report, fmt.Errorf("repair lagging targets: %w", err)
 	}
+	repairedTargets := repair.Changed()
 	checkRun, err := a.State.BeginRun(ctx, "update-check")
 	if err != nil {
 		return report, err
@@ -636,7 +687,7 @@ func (a *App) Update(ctx context.Context, dryRun bool) (report RunReport, runErr
 		if err := requireSupportedAnnotations(pointer, nil); err != nil {
 			return report, err
 		}
-		if pointer.HeaderInspectorVersion < scoreheader.InspectorVersion {
+		if pointer.HeaderInspectorVersion < scoreheader.InspectorVersion || pointer.CatalogMetadataVersion < model.CatalogMetadataVersion {
 			annotation, err = a.Annotate(ctx, false)
 			if err != nil {
 				return report, fmt.Errorf("refresh stored-object annotations: %w", err)
@@ -661,14 +712,18 @@ func (a *App) Update(ctx context.Context, dryRun bool) (report RunReport, runErr
 	}
 	if scoreOK && metaOK && scoreDoc.NotModified && metaDoc.NotModified {
 		if annotation.Changed {
-			message := "published stored-object annotations; upstream sentinels are unchanged"
+			message := strings.TrimSuffix(annotation.Message, "; no upstream access") + "; upstream sentinels are unchanged"
 			if repairedTargets {
-				message = "published stored-object annotations and repaired lagging targets; upstream sentinels are unchanged"
+				message += "; " + repair.Description()
 			}
-			return RunReport{Command: "update", ReleaseID: annotation.ReleaseID, Changed: true, Message: message}, nil
+			result := RunReport{Command: "update", ReleaseID: annotation.ReleaseID, Changed: true, Message: message}
+			if repair.Changed() {
+				result.Repair = &repair
+			}
+			return result, nil
 		}
 		if repairedTargets {
-			return RunReport{Command: "update", ReleaseID: pointer.ReleaseID, Changed: true, Message: "repaired lagging targets; upstream sentinels are unchanged"}, nil
+			return RunReport{Command: "update", ReleaseID: pointer.ReleaseID, Changed: true, Message: repair.Description() + "; upstream sentinels are unchanged", Repair: &repair}, nil
 		}
 		return RunReport{Command: "update", Changed: false, Message: "upstream sentinels are unchanged"}, nil
 	}
@@ -700,6 +755,9 @@ func headerInspectionsNeeded(entries []model.Entry) int {
 func requireSupportedAnnotations(pointer model.Pointer, entries []model.Entry) error {
 	if pointer.HeaderInspectorVersion > scoreheader.InspectorVersion {
 		return fmt.Errorf("published header inspector version %d is newer than this binary's version %d; upgrade pgsc-mirror before publishing", pointer.HeaderInspectorVersion, scoreheader.InspectorVersion)
+	}
+	if pointer.CatalogMetadataVersion > model.CatalogMetadataVersion {
+		return fmt.Errorf("published catalog metadata version %d is newer than this binary's version %d; upgrade pgsc-mirror before publishing", pointer.CatalogMetadataVersion, model.CatalogMetadataVersion)
 	}
 	for i := range entries {
 		if entries[i].Status == model.StatusReady && entries[i].Header != nil && entries[i].Header.InspectorVersion > scoreheader.InspectorVersion {

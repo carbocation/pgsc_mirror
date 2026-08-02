@@ -149,9 +149,9 @@ func (u *syntheticUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("ETag", etag)
-		io.WriteString(w, "pgs_id,license,note\n")
+		io.WriteString(w, "Polygenic Score (PGS) ID,PGS Name,Reported Trait,Mapped Trait(s) (EFO label),Mapped Trait(s) (EFO ID),License/Terms of Use,note\n")
 		for _, id := range ids {
-			fmt.Fprintf(w, "%s,%s,%s\n", id, u.licenses[id], u.note)
+			fmt.Fprintf(w, "%s,name-%s,reported-%s,mapped-%s,EFO_%s,%s,%s\n", id, id, id, id, strings.TrimPrefix(id, "PGS"), u.licenses[id], u.note)
 		}
 		return
 	}
@@ -225,12 +225,15 @@ func TestReconcileLifecycleAndRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("flat score was not published: %v", err)
 	}
-	pointer, _, err := a.latest(ctx)
+	pointer, initialEntries, err := a.latest(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if pointer.ManifestTSVKey != model.ManifestTSVKey(initial) || pointer.ManifestTSVSHA256 == "" {
 		t.Fatalf("LATEST does not pin the release manifest TSV: %+v", pointer)
+	}
+	if pointer.CatalogMetadataVersion != model.CatalogMetadataVersion || len(initialEntries) != 1 || initialEntries[0].PGSName != "name-PGS000001" || initialEntries[0].TraitReported != "reported-PGS000001" || initialEntries[0].TraitMapped != "mapped-PGS000001" || initialEntries[0].TraitEFO != "EFO_000001" {
+		t.Fatalf("release does not contain catalog phenotype metadata: pointer=%+v entries=%+v", pointer, initialEntries)
 	}
 	releaseTSV, _, err := a.targets[0].Open(ctx, pointer.ManifestTSVKey)
 	if err != nil {
@@ -247,7 +250,7 @@ func TestReconcileLifecycleAndRecovery(t *testing.T) {
 	}
 	latestTSVBytes, err := io.ReadAll(latestTSV)
 	latestTSV.Close()
-	if err != nil || !bytes.Equal(releaseTSVBytes, latestTSVBytes) || !bytes.Contains(latestTSVBytes, []byte("release_id\tpgs_id\t")) || !bytes.Contains(latestTSVBytes, []byte(initial+"\tPGS000001\t")) {
+	if err != nil || !bytes.Equal(releaseTSVBytes, latestTSVBytes) || !bytes.Contains(latestTSVBytes, []byte("release_id\tpgs_id\tpgs_name\ttrait_reported\ttrait_mapped\ttrait_efo\t")) || !bytes.Contains(latestTSVBytes, []byte(initial+"\tPGS000001\tname-PGS000001\treported-PGS000001\tmapped-PGS000001\tEFO_000001\t")) {
 		t.Fatalf("latest manifest TSV is not the readable release copy: err=%v\n%s", err, latestTSVBytes)
 	}
 	v, err := a.Verify(ctx, 0)
@@ -493,6 +496,9 @@ func TestUpdateBackfillsManifestTSVForCurrentRelease(t *testing.T) {
 	}
 	if !report.Changed {
 		t.Fatalf("manifest TSV backfill was not reported: %+v", report)
+	}
+	if report.Repair == nil || report.Repair.ManifestTSVTargets != 1 || !report.Repair.ManifestTSVBackfill || report.Repair.SynchronizedTargets != 0 || !strings.Contains(report.Message, "backfilled TSV manifest on 1 configured target(s)") {
+		t.Fatalf("manifest TSV backfill details are inaccurate: %+v", report)
 	}
 	current, _, err := a.latest(ctx)
 	if err != nil {
@@ -787,7 +793,7 @@ func TestReconcileRepairsLaggingSecondaryPointer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !repaired.Changed || !strings.Contains(repaired.Message, "repaired lagging targets") {
+	if !repaired.Changed || repaired.Repair == nil || repaired.Repair.SynchronizedTargets != 1 || !strings.Contains(repaired.Message, "synchronized 1 lagging secondary target(s)") {
 		t.Fatalf("repair was not reported: %+v", repaired)
 	}
 	secondaryPointer, _, err = a.readPointer(context.Background(), secondary)

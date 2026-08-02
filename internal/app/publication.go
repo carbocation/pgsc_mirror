@@ -399,12 +399,12 @@ func catalogScorePath(e *model.Entry) string {
 // convergeTargets repairs a publication interrupted after the authoritative
 // target advanced but before a later target's pointer did. Immutable objects
 // are copied first; the lagging pointer is advanced last with compare-and-swap.
-func (a *App) convergeTargets(ctx context.Context, p model.Pointer, entries []model.Entry) (bool, error) {
+func (a *App) convergeTargets(ctx context.Context, p model.Pointer, entries []model.Entry) (int, error) {
 	if p.ReleaseID == "" || len(a.targets) < 2 {
-		return false, nil
+		return 0, nil
 	}
 	source := a.targets[0]
-	repaired := false
+	repaired := 0
 	for _, dest := range a.targets[1:] {
 		current, currentInfo, err := a.readPointer(ctx, dest.Store)
 		if err == nil && current.ReleaseID == p.ReleaseID && current.ManifestTSVKey == p.ManifestTSVKey && current.ManifestTSVSHA256 == p.ManifestTSVSHA256 {
@@ -430,7 +430,7 @@ func (a *App) convergeTargets(ctx context.Context, p model.Pointer, entries []mo
 		if _, err := dest.Put(ctx, model.LatestKey, bytes.NewReader(pointerBytes), opts); err != nil {
 			return repaired, fmt.Errorf("advance repaired pointer in %s: %w", dest.Name(), err)
 		}
-		repaired = true
+		repaired++
 	}
 	return repaired, nil
 }
@@ -438,33 +438,34 @@ func (a *App) convergeTargets(ctx context.Context, p model.Pointer, entries []mo
 // repairLaggingTargets performs provider-to-provider catch-up without reading
 // the upstream catalog. It is used by lightweight startup after local state was
 // restored from the shared maintenance checkpoint.
-func (a *App) repairLaggingTargets(ctx context.Context) (repaired bool, runErr error) {
+func (a *App) repairLaggingTargets(ctx context.Context) (repair RepairReport, runErr error) {
 	pointer, entries, err := a.latest(ctx)
 	if err != nil || pointer.ReleaseID == "" {
-		return false, err
+		return repair, err
 	}
-	needsRepair, err := a.manifestTSVPublicationNeedsRepair(ctx, pointer, entries)
+	manifestTargets, err := a.manifestTSVTargetsNeedingRepair(ctx, pointer, entries)
 	if err != nil {
-		return false, err
+		return repair, err
 	}
-	if !needsRepair && len(a.targets) > 1 {
+	lagging := false
+	if len(a.targets) > 1 {
 		for _, target := range a.targets[1:] {
 			current, _, err := a.readPointer(ctx, target.Store)
 			if errors.Is(err, store.ErrNotFound) || (err == nil && (current.ReleaseID != pointer.ReleaseID || current.ManifestTSVKey != pointer.ManifestTSVKey || current.ManifestTSVSHA256 != pointer.ManifestTSVSHA256)) {
-				needsRepair = true
+				lagging = true
 				break
 			}
 			if err != nil {
-				return false, fmt.Errorf("read pointer from %s: %w", target.Name(), err)
+				return repair, fmt.Errorf("read pointer from %s: %w", target.Name(), err)
 			}
 		}
 	}
-	if !needsRepair {
-		return false, nil
+	if manifestTargets == 0 && !lagging {
+		return repair, nil
 	}
 	lease, err := a.acquireLease(ctx)
 	if err != nil {
-		return false, err
+		return repair, err
 	}
 	ctx = a.startLeaseRenewal(ctx, lease)
 	defer func() {
@@ -483,48 +484,62 @@ func (a *App) repairLaggingTargets(ctx context.Context) (repaired bool, runErr e
 	// initial check and lease acquisition cannot be repaired backward.
 	pointer, entries, err = a.latest(ctx)
 	if err != nil {
-		return false, err
+		return repair, err
 	}
-	repaired, err = a.convergeTargets(ctx, pointer, entries)
+	repair.ManifestTSVBackfill = pointer.ManifestTSVKey == "" && pointer.ManifestTSVSHA256 == ""
+	manifestTargets, err = a.manifestTSVTargetsNeedingRepair(ctx, pointer, entries)
 	if err != nil {
-		return repaired, err
+		return repair, err
+	}
+	repair.SynchronizedTargets, err = a.convergeTargets(ctx, pointer, entries)
+	if err != nil {
+		return repair, err
 	}
 	pointer, manifestTSVRepaired, err := a.ensureManifestTSV(ctx, pointer, entries)
-	repaired = repaired || manifestTSVRepaired
 	if err != nil {
-		return repaired, err
+		return repair, err
+	}
+	if manifestTSVRepaired {
+		repair.ManifestTSVTargets = manifestTargets
+		if repair.ManifestTSVTargets == 0 {
+			repair.ManifestTSVTargets = len(a.targets)
+		}
 	}
 	if a.State != nil && a.Config.Targets.Local {
 		if err := a.State.RecordRelease(ctx, pointer, entries); err != nil {
-			return repaired, err
+			return repair, err
 		}
 	}
-	return repaired, nil
+	return repair, nil
 }
 
-func (a *App) manifestTSVPublicationNeedsRepair(ctx context.Context, pointer model.Pointer, entries []model.Entry) (bool, error) {
+func (a *App) manifestTSVTargetsNeedingRepair(ctx context.Context, pointer model.Pointer, entries []model.Entry) (int, error) {
 	expected, _, err := attachManifestTSV(pointer, entries)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
-	if pointer.ManifestTSVKey != expected.ManifestTSVKey || pointer.ManifestTSVSHA256 != expected.ManifestTSVSHA256 {
-		return true, nil
-	}
+	pointerNeedsRepair := pointer.ManifestTSVKey != expected.ManifestTSVKey || pointer.ManifestTSVSHA256 != expected.ManifestTSVSHA256
+	targets := 0
 	for _, target := range a.targets {
+		needsRepair := pointerNeedsRepair
 		for _, key := range []string{expected.ManifestTSVKey, model.LatestManifestTSVKey} {
 			got, err := objectSHA256(ctx, target.Store, key)
 			if errors.Is(err, store.ErrNotFound) {
-				return true, nil
+				needsRepair = true
+				continue
 			}
 			if err != nil {
-				return false, err
+				return 0, err
 			}
 			if got != expected.ManifestTSVSHA256 {
-				return true, nil
+				needsRepair = true
 			}
 		}
+		if needsRepair {
+			targets++
+		}
 	}
-	return false, nil
+	return targets, nil
 }
 
 func syncReleaseToTarget(ctx context.Context, source, dest store.Store, p model.Pointer, entries []model.Entry) error {

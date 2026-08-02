@@ -65,7 +65,7 @@ func Plan(previous, desired []model.Entry) []Change {
 			c.Kind = Revise
 		case o.Status != n.Status:
 			c.Kind = Withdraw
-		case o.License != n.License || o.SourceURL != n.SourceURL:
+		case o.PGSName != n.PGSName || o.TraitReported != n.TraitReported || o.TraitMapped != n.TraitMapped || o.TraitEFO != n.TraitEFO || o.License != n.License || o.SourceURL != n.SourceURL:
 			c.Kind = Metadata
 		default:
 			c.Kind = Unchanged

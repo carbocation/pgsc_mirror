@@ -48,6 +48,17 @@ type ScoreObjectInfo struct {
 	StatusCode    int
 }
 
+// ScoreMetadata is the per-score descriptive subset of the catalog metadata
+// that belongs directly in release manifests. The complete upstream CSV is
+// still preserved alongside every release.
+type ScoreMetadata struct {
+	PGSName       string
+	TraitReported string
+	TraitMapped   string
+	TraitEFO      string
+	License       string
+}
+
 func New(baseURLs []string, scoreList, metadataCSV string, httpClient *transfer.HTTPClient) *Client {
 	return &Client{baseURLs: baseURLs, scoreList: scoreList, metadataCSV: metadataCSV, http: httpClient}
 }
@@ -89,27 +100,36 @@ func ParseMD5(r io.Reader) (string, error) {
 	return strings.ToLower(fields[0]), nil
 }
 
-func ParseLicenses(r io.Reader) (map[string]string, error) {
+func ParseMetadata(r io.Reader) (map[string]ScoreMetadata, error) {
 	cr := csv.NewReader(r)
 	cr.FieldsPerRecord = -1
 	header, err := cr.Read()
 	if err != nil {
 		return nil, err
 	}
-	idCol, licenseCol := -1, -1
+	columns := map[string]int{}
 	for i, h := range header {
 		normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(h, "\ufeff")))
 		switch normalized {
 		case "pgs_id", "pgs id", "polygenic score (pgs) id":
-			idCol = i
+			columns["pgs_id"] = i
+		case "pgs_name", "pgs name":
+			columns["pgs_name"] = i
+		case "trait_reported", "reported trait":
+			columns["trait_reported"] = i
+		case "trait_mapped", "mapped trait(s) (efo label)":
+			columns["trait_mapped"] = i
+		case "trait_efo", "mapped trait(s) (efo id)":
+			columns["trait_efo"] = i
 		case "license", "license_name", "license/terms of use":
-			licenseCol = i
+			columns["license"] = i
 		}
 	}
-	if idCol < 0 {
+	idCol, ok := columns["pgs_id"]
+	if !ok {
 		return nil, errors.New("metadata CSV has no pgs_id column")
 	}
-	out := make(map[string]string)
+	out := make(map[string]ScoreMetadata)
 	for {
 		record, err := cr.Read()
 		if errors.Is(err, io.EOF) {
@@ -125,11 +145,20 @@ func ParseLicenses(r io.Reader) (map[string]string, error) {
 		if !idPattern.MatchString(id) {
 			continue
 		}
-		license := ""
-		if licenseCol >= 0 && licenseCol < len(record) {
-			license = strings.TrimSpace(record[licenseCol])
+		value := func(name string) string {
+			column, ok := columns[name]
+			if !ok || column >= len(record) {
+				return ""
+			}
+			return strings.TrimSpace(record[column])
 		}
-		out[id] = license
+		out[id] = ScoreMetadata{
+			PGSName:       value("pgs_name"),
+			TraitReported: value("trait_reported"),
+			TraitMapped:   value("trait_mapped"),
+			TraitEFO:      value("trait_efo"),
+			License:       value("license"),
+		}
 	}
 	return out, nil
 }
@@ -190,13 +219,13 @@ func (c *Client) ScoreList(ctx context.Context, etag, modified string) (Document
 	return d, ids, err
 }
 
-func (c *Client) Metadata(ctx context.Context, etag, modified string) (Document, map[string]string, error) {
+func (c *Client) Metadata(ctx context.Context, etag, modified string) (Document, map[string]ScoreMetadata, error) {
 	d, err := c.fetch(ctx, c.metadataCSV, etag, modified, 512<<20)
 	if err != nil || d.NotModified {
 		return d, nil, err
 	}
-	licenses, err := ParseLicenses(bytes.NewReader(d.Body))
-	return d, licenses, err
+	metadata, err := ParseMetadata(bytes.NewReader(d.Body))
+	return d, metadata, err
 }
 
 func (c *Client) Checksum(ctx context.Context, id, genomeBuild string) (string, string, error) {

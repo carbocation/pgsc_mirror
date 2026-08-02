@@ -28,13 +28,14 @@ func sorted(entries []model.Entry) []model.Entry {
 // ReleaseID combines a UTC timestamp with a digest of the desired logical state.
 func ReleaseID(now time.Time, entries []model.Entry, snapshots ...[]byte) (string, error) {
 	type seed struct {
-		PGSID, GenomeBuild, SourceURL, SourceMD5, ScoreKey, Status, License string
-		SizeBytes                                                           int64
-		Header                                                              *scoreheader.Inspection
+		PGSID, PGSName, TraitReported, TraitMapped, TraitEFO         string
+		GenomeBuild, SourceURL, SourceMD5, ScoreKey, Status, License string
+		SizeBytes                                                    int64
+		Header                                                       *scoreheader.Inspection
 	}
 	ss := make([]seed, 0, len(entries))
 	for _, e := range sorted(entries) {
-		ss = append(ss, seed{e.PGSID, e.GenomeBuild, e.SourceURL, e.SourceMD5, e.ScoreKey, e.Status, e.License, e.SizeBytes, e.Header})
+		ss = append(ss, seed{e.PGSID, e.PGSName, e.TraitReported, e.TraitMapped, e.TraitEFO, e.GenomeBuild, e.SourceURL, e.SourceMD5, e.ScoreKey, e.Status, e.License, e.SizeBytes, e.Header})
 	}
 	b, err := json.Marshal(ss)
 	if err != nil {
@@ -74,6 +75,10 @@ func Encode(entries []model.Entry) ([]byte, string, error) {
 var TSVColumns = []string{
 	"release_id",
 	"pgs_id",
+	"pgs_name",
+	"trait_reported",
+	"trait_mapped",
+	"trait_efo",
 	"genome_build",
 	"status",
 	"score_key",
@@ -130,6 +135,10 @@ func tsvRecord(e model.Entry) ([]string, error) {
 	record := []string{
 		e.ReleaseID,
 		e.PGSID,
+		e.PGSName,
+		e.TraitReported,
+		e.TraitMapped,
+		e.TraitEFO,
 		e.GenomeBuild,
 		e.Status,
 		e.ScoreKey,
