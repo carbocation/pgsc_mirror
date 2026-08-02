@@ -73,7 +73,7 @@ type AnnotationReport struct {
 }
 
 // Annotate refreshes versioned descriptive annotations using only the current
-// immutable release and its stored blobs. It deliberately does not use the
+// manifest release and its stored scoring files. It deliberately does not use the
 // catalog or HTTP transfer clients, which makes upstream independence an
 // architectural property rather than a request option.
 func (a *App) Annotate(ctx context.Context, dryRun bool) (report AnnotationReport, runErr error) {
@@ -203,6 +203,7 @@ func (a *App) annotateCurrent(ctx context.Context, report AnnotationReport, writ
 		EntryCount:             len(entries),
 		GenomeBuild:            pointer.GenomeBuild,
 		HeaderInspectorVersion: observedHeaderInspectorVersion(entries),
+		ScoreLayoutVersion:     pointer.ScoreLayoutVersion,
 	}
 	if report.DryRun {
 		report.Message = fmt.Sprintf("would publish stored-object annotations for %d scoring file(s); no upstream access", report.Updated)
@@ -266,7 +267,7 @@ func annotateStoredHeaders(ctx context.Context, source store.Store, entries []mo
 						return
 					}
 					result := annotationResult{index: index}
-					r, _, err := source.Open(ctx, entries[index].BlobKey)
+					r, _, err := source.Open(ctx, entries[index].ScoreKey)
 					if err == nil {
 						result.inspection = scoreheader.InspectGzip(r)
 						err = r.Close()

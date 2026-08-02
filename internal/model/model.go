@@ -2,6 +2,8 @@
 package model
 
 import (
+	"encoding/json"
+	"path"
 	"time"
 
 	"github.com/carbocation/pgsc_mirror/pkg/scoreheader"
@@ -13,6 +15,8 @@ const (
 	MaintenanceKey = "operations/maintenance.json"
 	StatusReady    = "available"
 	StatusGone     = "withdrawn"
+	// ScoreLayoutVersion identifies the flat, source-named scoring-file layout.
+	ScoreLayoutVersion = 1
 )
 
 type Entry struct {
@@ -22,7 +26,7 @@ type Entry struct {
 	SourceURL            string                  `json:"source_url"`
 	SourceMD5            string                  `json:"source_md5"`
 	SizeBytes            int64                   `json:"size_bytes"`
-	BlobKey              string                  `json:"blob_key"`
+	ScoreKey             string                  `json:"score_key"`
 	UpstreamETag         string                  `json:"upstream_etag,omitempty"`
 	UpstreamLastModified string                  `json:"upstream_last_modified,omitempty"`
 	FirstSeenAt          time.Time               `json:"first_seen_at"`
@@ -43,6 +47,7 @@ type Pointer struct {
 	EntryCount             int       `json:"entry_count"`
 	GenomeBuild            string    `json:"genome_build"`
 	HeaderInspectorVersion int       `json:"header_inspector_version,omitempty"`
+	ScoreLayoutVersion     int       `json:"score_layout_version,omitempty"`
 }
 
 type Lease struct {
@@ -51,12 +56,39 @@ type Lease struct {
 	ExpiresAt  time.Time `json:"expires_at"`
 }
 
-func BlobKey(md5sum string) string {
+// ScoreKey is the simple public scoring-file namespace. The filename is the
+// original PGS Catalog basename; the scores/ prefix keeps data separate from
+// release and operational objects.
+func ScoreKey(pgsID, genomeBuild string) string {
+	return path.Join("scores", pgsID+"_hmPOS_"+genomeBuild+".txt.gz")
+}
+
+// LegacyBlobKey identifies the content-addressed layout used by releases
+// published before ScoreLayoutVersion 1. It is retained only for migrations
+// and backwards-compatible manifest reads.
+func LegacyBlobKey(md5sum string) string {
 	prefix := "00"
 	if len(md5sum) >= 2 {
 		prefix = md5sum[:2]
 	}
 	return "blobs/md5/" + prefix + "/" + md5sum + ".txt.gz"
+}
+
+// UnmarshalJSON accepts both current score_key manifests and legacy blob_key
+// manifests. Newly encoded entries contain only score_key.
+func (e *Entry) UnmarshalJSON(data []byte) error {
+	type entry Entry
+	wire := struct {
+		*entry
+		LegacyBlobKey string `json:"blob_key"`
+	}{entry: (*entry)(e)}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if e.ScoreKey == "" {
+		e.ScoreKey = wire.LegacyBlobKey
+	}
+	return nil
 }
 
 func ManifestKey(releaseID string) string {

@@ -106,7 +106,7 @@ func verifySnapshot(ctx context.Context, st store.Store, key, expected string) e
 }
 
 func verifyObject(ctx context.Context, st store.Store, e model.Entry) error {
-	r, info, err := st.Open(ctx, e.BlobKey)
+	r, info, err := st.Open(ctx, e.ScoreKey)
 	if err != nil {
 		return err
 	}
@@ -156,27 +156,27 @@ func (a *App) Pull(ctx context.Context, dryRun bool) (RunReport, error) {
 		if err := verifyObject(ctx, dest.Store, e); err == nil {
 			continue
 		}
-		if info, statErr := dest.Stat(ctx, e.BlobKey); statErr == nil {
+		if info, statErr := dest.Stat(ctx, e.ScoreKey); statErr == nil {
 			gen := info.Generation
-			if delErr := dest.Delete(ctx, e.BlobKey, store.DeleteOptions{GenerationMatch: &gen}); delErr != nil {
-				return RunReport{}, fmt.Errorf("remove corrupt local %s: %w", e.BlobKey, delErr)
+			if delErr := dest.Delete(ctx, e.ScoreKey, store.DeleteOptions{GenerationMatch: &gen}); delErr != nil {
+				return RunReport{}, fmt.Errorf("remove corrupt local %s: %w", e.ScoreKey, delErr)
 			}
 		} else if !errors.Is(statErr, store.ErrNotFound) {
 			return RunReport{}, statErr
 		}
-		r, _, err := source.Open(ctx, e.BlobKey)
+		r, _, err := source.Open(ctx, e.ScoreKey)
 		if err != nil {
 			return RunReport{}, err
 		}
-		info, err := dest.Put(ctx, e.BlobKey, r, store.PutOptions{DoesNotExist: true, ContentType: "application/gzip"})
+		info, err := dest.Put(ctx, e.ScoreKey, r, store.PutOptions{DoesNotExist: true, ContentType: "application/gzip"})
 		r.Close()
 		if err != nil {
 			return RunReport{}, err
 		}
 		if got := hex.EncodeToString(info.MD5); got != e.SourceMD5 {
 			gen := info.Generation
-			_ = dest.Delete(ctx, e.BlobKey, store.DeleteOptions{GenerationMatch: &gen})
-			return RunReport{}, fmt.Errorf("source object %s has MD5 %s, want %s", e.BlobKey, got, e.SourceMD5)
+			_ = dest.Delete(ctx, e.ScoreKey, store.DeleteOptions{GenerationMatch: &gen})
+			return RunReport{}, fmt.Errorf("source object %s has MD5 %s, want %s", e.ScoreKey, got, e.SourceMD5)
 		}
 	}
 	metaReader, _, err := source.Open(ctx, model.MetadataKey(p.ReleaseID))
@@ -340,7 +340,7 @@ func (a *App) RebuildState(ctx context.Context, dryRun bool) (RunReport, error) 
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return RunReport{}, err
 		}
-		p := model.Pointer{ReleaseID: id, ManifestKey: obj.Key, ManifestSHA256: hex.EncodeToString(sum[:]), ScoreListSHA256: scoreSHA, MetadataSHA256: metadataSHA, PublishedAt: published, EntryCount: len(entries), GenomeBuild: a.Config.GenomeBuild, HeaderInspectorVersion: observedHeaderInspectorVersion(entries)}
+		p := model.Pointer{ReleaseID: id, ManifestKey: obj.Key, ManifestSHA256: hex.EncodeToString(sum[:]), ScoreListSHA256: scoreSHA, MetadataSHA256: metadataSHA, PublishedAt: published, EntryCount: len(entries), GenomeBuild: a.Config.GenomeBuild, HeaderInspectorVersion: observedHeaderInspectorVersion(entries), ScoreLayoutVersion: observedScoreLayoutVersion(entries)}
 		releases = append(releases, state.RebuildRelease{Pointer: p, Entries: entries})
 	}
 	sort.Slice(releases, func(i, j int) bool {
@@ -380,6 +380,13 @@ func observedHeaderInspectorVersion(entries []model.Entry) int {
 		}
 	}
 	return version
+}
+
+func observedScoreLayoutVersion(entries []model.Entry) int {
+	if scoreLayoutMigrationsNeeded(entries) == 0 {
+		return model.ScoreLayoutVersion
+	}
+	return 0
 }
 
 func objectSHA256(ctx context.Context, st store.Store, key string) (string, error) {
@@ -465,16 +472,18 @@ func (a *App) GC(ctx context.Context, apply bool) (GCReport, error) {
 				return report, err
 			}
 			for _, e := range entries {
-				refs[e.BlobKey] = true
+				refs[e.ScoreKey] = true
 			}
 		}
-		blobs, err := t.List(ctx, "blobs/md5")
-		if err != nil {
-			return report, err
-		}
-		for _, obj := range blobs {
-			if !refs[obj.Key] && obj.LastModified.Before(cutoff) {
-				report.Items = append(report.Items, GCItem{Target: t.Name(), Key: obj.Key, Reason: "unreferenced blob past grace period", Size: obj.Size})
+		for _, prefix := range []string{"scores", "blobs/md5"} {
+			objects, err := t.List(ctx, prefix)
+			if err != nil {
+				return report, err
+			}
+			for _, obj := range objects {
+				if !refs[obj.Key] && obj.LastModified.Before(cutoff) {
+					report.Items = append(report.Items, GCItem{Target: t.Name(), Key: obj.Key, Reason: "unreferenced scoring object past grace period", Size: obj.Size})
+				}
 			}
 		}
 		if apply {

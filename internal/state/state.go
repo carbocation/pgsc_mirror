@@ -361,7 +361,7 @@ func (d *DB) RecordRelease(ctx context.Context, p model.Pointer, entries []model
 	for _, e := range entries {
 		_, err = tx.ExecContext(ctx, `INSERT INTO scores(pgs_id,release_id,genome_build,source_url,source_md5,size_bytes,blob_key,upstream_etag,upstream_last_modified,first_seen_at,last_seen_at,status,license,gcs_generation)
  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(pgs_id) DO UPDATE SET release_id=excluded.release_id,genome_build=excluded.genome_build,source_url=excluded.source_url,source_md5=excluded.source_md5,size_bytes=excluded.size_bytes,blob_key=excluded.blob_key,upstream_etag=excluded.upstream_etag,upstream_last_modified=excluded.upstream_last_modified,first_seen_at=excluded.first_seen_at,last_seen_at=excluded.last_seen_at,status=excluded.status,license=excluded.license,gcs_generation=excluded.gcs_generation`,
-			e.PGSID, e.ReleaseID, e.GenomeBuild, e.SourceURL, e.SourceMD5, e.SizeBytes, e.BlobKey, e.UpstreamETag, e.UpstreamLastModified, e.FirstSeenAt.UTC().Format(time.RFC3339Nano), e.LastSeenAt.UTC().Format(time.RFC3339Nano), e.Status, e.License, e.GCSGeneration)
+			e.PGSID, e.ReleaseID, e.GenomeBuild, e.SourceURL, e.SourceMD5, e.SizeBytes, e.ScoreKey, e.UpstreamETag, e.UpstreamLastModified, e.FirstSeenAt.UTC().Format(time.RFC3339Nano), e.LastSeenAt.UTC().Format(time.RFC3339Nano), e.Status, e.License, e.GCSGeneration)
 		if err != nil {
 			return err
 		}
@@ -369,7 +369,7 @@ func (d *DB) RecordRelease(ctx context.Context, p model.Pointer, entries []model
 		if localAvailable {
 			local = 1
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO objects(blob_key,source_md5,size_bytes,local_available,gcs_generation,verified_at) VALUES(?,?,?,?,?,?) ON CONFLICT(blob_key) DO UPDATE SET local_available=max(local_available,excluded.local_available),gcs_generation=max(gcs_generation,excluded.gcs_generation),verified_at=excluded.verified_at`, e.BlobKey, e.SourceMD5, e.SizeBytes, local, e.GCSGeneration, time.Now().UTC().Format(time.RFC3339Nano))
+		_, err = tx.ExecContext(ctx, `INSERT INTO objects(blob_key,source_md5,size_bytes,local_available,gcs_generation,verified_at) VALUES(?,?,?,?,?,?) ON CONFLICT(blob_key) DO UPDATE SET local_available=max(local_available,excluded.local_available),gcs_generation=max(gcs_generation,excluded.gcs_generation),verified_at=excluded.verified_at`, e.ScoreKey, e.SourceMD5, e.SizeBytes, local, e.GCSGeneration, time.Now().UTC().Format(time.RFC3339Nano))
 		if err != nil {
 			return err
 		}
@@ -416,10 +416,10 @@ func (d *DB) Rebuild(ctx context.Context, releases []RebuildRelease) error {
 			return err
 		}
 		for _, e := range rel.Entries {
-			if _, err = tx.ExecContext(ctx, `INSERT INTO scores(pgs_id,release_id,genome_build,source_url,source_md5,size_bytes,blob_key,upstream_etag,upstream_last_modified,first_seen_at,last_seen_at,status,license,gcs_generation) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(pgs_id) DO UPDATE SET release_id=excluded.release_id,genome_build=excluded.genome_build,source_url=excluded.source_url,source_md5=excluded.source_md5,size_bytes=excluded.size_bytes,blob_key=excluded.blob_key,upstream_etag=excluded.upstream_etag,upstream_last_modified=excluded.upstream_last_modified,first_seen_at=excluded.first_seen_at,last_seen_at=excluded.last_seen_at,status=excluded.status,license=excluded.license,gcs_generation=excluded.gcs_generation`, e.PGSID, e.ReleaseID, e.GenomeBuild, e.SourceURL, e.SourceMD5, e.SizeBytes, e.BlobKey, e.UpstreamETag, e.UpstreamLastModified, e.FirstSeenAt.UTC().Format(time.RFC3339Nano), e.LastSeenAt.UTC().Format(time.RFC3339Nano), e.Status, e.License, e.GCSGeneration); err != nil {
+			if _, err = tx.ExecContext(ctx, `INSERT INTO scores(pgs_id,release_id,genome_build,source_url,source_md5,size_bytes,blob_key,upstream_etag,upstream_last_modified,first_seen_at,last_seen_at,status,license,gcs_generation) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(pgs_id) DO UPDATE SET release_id=excluded.release_id,genome_build=excluded.genome_build,source_url=excluded.source_url,source_md5=excluded.source_md5,size_bytes=excluded.size_bytes,blob_key=excluded.blob_key,upstream_etag=excluded.upstream_etag,upstream_last_modified=excluded.upstream_last_modified,first_seen_at=excluded.first_seen_at,last_seen_at=excluded.last_seen_at,status=excluded.status,license=excluded.license,gcs_generation=excluded.gcs_generation`, e.PGSID, e.ReleaseID, e.GenomeBuild, e.SourceURL, e.SourceMD5, e.SizeBytes, e.ScoreKey, e.UpstreamETag, e.UpstreamLastModified, e.FirstSeenAt.UTC().Format(time.RFC3339Nano), e.LastSeenAt.UTC().Format(time.RFC3339Nano), e.Status, e.License, e.GCSGeneration); err != nil {
 				return err
 			}
-			if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO objects(blob_key,source_md5,size_bytes,gcs_generation) VALUES(?,?,?,?)`, e.BlobKey, e.SourceMD5, e.SizeBytes, e.GCSGeneration); err != nil {
+			if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO objects(blob_key,source_md5,size_bytes,gcs_generation) VALUES(?,?,?,?)`, e.ScoreKey, e.SourceMD5, e.SizeBytes, e.GCSGeneration); err != nil {
 				return err
 			}
 		}

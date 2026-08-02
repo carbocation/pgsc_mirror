@@ -2,6 +2,15 @@
 
 `pgsc-mirror` maintains a verified local and/or Google Cloud Storage mirror of PGS Catalog scoring files harmonized to GRCh38. The mirrored gzip files remain byte-identical to upstream.
 
+Scoring files have a deliberately simple public layout:
+
+```text
+scores/PGS000001_hmPOS_GRCh38.txt.gz
+scores/PGS000002_hmPOS_GRCh38.txt.gz
+```
+
+A basic consumer can periodically list `scores/` and checkpoint each object's name and GCS generation: a new name is a newly mirrored score, while a new generation of an existing name is an upstream revision. The release manifest is optional for this workflow. Consumers use it when they need an atomic snapshot, checksums, licensing, withdrawal status, or exact provenance.
+
 ## Quick start
 
 Start with the example configuration:
@@ -49,7 +58,7 @@ Early `verify_interval` and `[verify]` settings are accepted but ignored so exis
 
 ## What must be kept locally?
 
-If GCS is enabled, no local runtime file is required to preserve the published mirror. The canonical data is the object set under the configured GCS bucket and prefix.
+If GCS is enabled, no local runtime file is required to preserve the published mirror. The canonical data is the object set under the configured GCS bucket and prefix. Enable GCS Object Versioning when historical manifests must continue to resolve older generations after an upstream score is revised; the manifest records the exact generation associated with each release.
 
 | Local item | What happens if it is lost? |
 |---|---|
@@ -99,7 +108,7 @@ No credentials belong in TOML. GCS uses Application Default Credentials. All ins
 
 Every command accepts `--config`. Reports accept `--json`. The explicit long-lived form is `pgsc-mirror --config config.toml run`.
 
-`annotate --dry-run` reports how many current scoring files need fresh annotations without acquiring a publication lease or writing mirror objects. While it works, the CLI prints progress every 250 processed objects to stderr. Its final report includes the complete observation for every unrecognized, unreadable, or warning-bearing header; use `--json` and redirect stdout to retain a structured report without mixing in progress. `annotate` reads the current immutable blobs and stored metadata snapshots, then publishes an annotation-only successor release if needed. Header inspection is the first supported annotation; normalization, liftover, and other analytical transformations remain downstream work. The long-lived mode performs this refresh automatically when its binary supports a newer annotation version.
+`annotate --dry-run` reports how many current scoring files need fresh annotations without acquiring a publication lease or writing mirror objects. While it works, the CLI prints progress every 250 processed objects to stderr. Its final report includes the complete observation for every unrecognized, unreadable, or warning-bearing header; use `--json` and redirect stdout to retain a structured report without mixing in progress. `annotate` reads the current score generations and stored metadata snapshots, then publishes an annotation-only successor release if needed. Header inspection is the first supported annotation; normalization, liftover, and other analytical transformations remain downstream work. The long-lived mode performs this refresh automatically when its binary supports a newer annotation version.
 
 ## Build
 
@@ -115,13 +124,13 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 
 ## Design and data integrity
 
-Published releases are immutable and become current only after every expected object is present, so an interruption cannot expose a partial release. Scoring files are verified over their compressed bytes and preserved without normalization. New and revised files also receive a bounded header inspection whose descriptive schema observation is stored in the manifest.
+Release manifests and metadata snapshots are immutable and become current only after every expected scoring object is present, so an interruption cannot expose a partial manifest release. Scoring files are verified over their compressed bytes and preserved without normalization. New and revised files also receive a bounded header inspection whose descriptive schema observation is stored in the manifest.
 
 The object layout, atomic publication process, restart behavior, bounded scratch model, and header inspection rules are documented in [`docs/design.md`](docs/design.md).
 
 Institution-specific transformations and derived near-copies should live outside this preservation mirror. [`docs/derived-workflows.md`](docs/derived-workflows.md) describes the immutable release contract that downstream jobs can consume.
 
-Withdrawn IDs are recorded rather than immediately deleted. `gc` protects the current release, recent releases, releases inside the configured grace period, and every blob they reference.
+Withdrawn IDs are recorded rather than immediately deleted. `gc` protects the current release, recent releases, releases inside the configured grace period, and every scoring object they reference.
 
 ## Development and tests
 

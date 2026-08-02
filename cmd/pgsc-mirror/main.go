@@ -297,6 +297,9 @@ func printHuman(w io.Writer, v any) {
 		if r.ScoreListChanged {
 			fmt.Fprintln(w, "score-list snapshot changed")
 		}
+		if r.ScoreLayoutChanged {
+			fmt.Fprintf(w, "score layout needs migration: %d object(s)\n", r.ScoreKeyMigrations)
+		}
 		if r.HeaderInspections > 0 {
 			fmt.Fprintf(w, "scoring headers needing inspection: %d\n", r.HeaderInspections)
 		}

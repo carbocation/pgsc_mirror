@@ -28,15 +28,15 @@ func TestEnsureBlobAnnotatesHeaderFromStoredObject(t *testing.T) {
 
 	data := gzipFixture(harmonizedHeaderFixture)
 	sum := md5hex(data)
-	key := model.BlobKey(sum)
+	key := model.ScoreKey("PGS000001", "GRCh38")
 	if _, err := ls.Put(ctx, key, bytes.NewReader(data), store.PutOptions{DoesNotExist: true}); err != nil {
 		t.Fatal(err)
 	}
 	cfg := config.Defaults()
 	cfg.State.WorkDir = t.TempDir()
 	a := &App{Config: cfg, targets: []target{{kind: "local", Store: ls}}}
-	entry := model.Entry{PGSID: "PGS000001", SourceMD5: sum, BlobKey: key, Status: model.StatusReady}
-	if err := a.ensureBlob(ctx, &entry); err != nil {
+	entry := model.Entry{PGSID: "PGS000001", GenomeBuild: "GRCh38", SourceMD5: sum, ScoreKey: key, Status: model.StatusReady}
+	if err := a.ensureScore(ctx, &entry); err != nil {
 		t.Fatal(err)
 	}
 	if entry.Header == nil || entry.Header.Type != scoreheader.TypeHarmonizedV2 || entry.Header.Status != scoreheader.StatusRecognized {
@@ -72,13 +72,13 @@ func TestUpdateAnnotatesLegacyManifestHeader(t *testing.T) {
 		SourceURL:   srv.URL + "/root/scores/PGS000001/ScoringFiles/Harmonized/PGS000001_hmPOS_GRCh38.txt.gz",
 		SourceMD5:   sum,
 		SizeBytes:   int64(len(data)),
-		BlobKey:     model.BlobKey(sum),
+		ScoreKey:    model.ScoreKey("PGS000001", "GRCh38"),
 		FirstSeenAt: now,
 		LastSeenAt:  now,
 		Status:      model.StatusReady,
 		License:     "CC0",
 	}
-	if _, err := a.targets[0].Put(ctx, entry.BlobKey, bytes.NewReader(data), store.PutOptions{DoesNotExist: true}); err != nil {
+	if _, err := a.targets[0].Put(ctx, entry.ScoreKey, bytes.NewReader(data), store.PutOptions{DoesNotExist: true}); err != nil {
 		t.Fatal(err)
 	}
 	manifestBytes, manifestSHA, err := manifest.Encode([]model.Entry{entry})

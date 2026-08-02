@@ -8,7 +8,7 @@ A consumer resolves `LATEST.json`, pins the referenced immutable manifest, and r
 
 - the input mirror release ID;
 - the score's PGS ID and source MD5;
-- the raw blob key;
+- the score key and GCS generation;
 - the header inspector version, type, and schema SHA-256;
 - the derivative's own checksum, status, and tool version.
 
@@ -24,7 +24,7 @@ A private derivative pipeline should maintain its own state database and storage
 
 1. Resolves and pins the public mirror release.
 2. Diffs manifest entries against derivative state using source MD5 plus the derivative tool/configuration version.
-3. Reads raw blobs without modifying them.
+3. Reads the pinned score generations without modifying them.
 4. Writes immutable, checksum-addressed derivative objects.
 5. Publishes an immutable derivative manifest containing input provenance.
 6. Advances its own pointer only after all required outputs are complete.

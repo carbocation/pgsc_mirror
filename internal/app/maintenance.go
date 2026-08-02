@@ -18,7 +18,9 @@ import (
 )
 
 const (
-	maintenanceCheckpointVersion = 1
+	// Version 2 prevents pre-flat-layout binaries from publishing the retired
+	// content-addressed layout after a mirror has migrated to score_key.
+	maintenanceCheckpointVersion = 2
 	maintenanceCheckpointMaxSize = 1 << 20
 	maintenanceFutureTolerance   = 5 * time.Minute
 )

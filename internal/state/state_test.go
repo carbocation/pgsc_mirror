@@ -17,7 +17,7 @@ func TestRecordAndRebuild(t *testing.T) {
 	defer db.Close()
 	ctx := context.Background()
 	now := time.Now().UTC()
-	e := model.Entry{ReleaseID: "r1", PGSID: "PGS000001", GenomeBuild: "GRCh38", SourceMD5: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BlobKey: model.BlobKey("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), Status: model.StatusReady, FirstSeenAt: now, LastSeenAt: now}
+	e := model.Entry{ReleaseID: "r1", PGSID: "PGS000001", GenomeBuild: "GRCh38", SourceMD5: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ScoreKey: model.ScoreKey("PGS000001", "GRCh38"), Status: model.StatusReady, FirstSeenAt: now, LastSeenAt: now}
 	p := model.Pointer{ReleaseID: "r1", ManifestKey: model.ManifestKey("r1"), ManifestSHA256: "abc", PublishedAt: now, EntryCount: 1}
 	if err := db.RecordRelease(ctx, p, []model.Entry{e}, true); err != nil {
 		t.Fatal(err)

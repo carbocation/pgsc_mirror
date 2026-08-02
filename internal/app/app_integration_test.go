@@ -219,6 +219,15 @@ func TestReconcileLifecycleAndRecovery(t *testing.T) {
 		t.Fatalf("unexpected initial report %+v", r)
 	}
 	initial := r.ReleaseID
+	scoreKey := model.ScoreKey("PGS000001", "GRCh38")
+	initialScore, err := a.targets[0].Stat(ctx, scoreKey)
+	if err != nil {
+		t.Fatalf("flat score was not published: %v", err)
+	}
+	legacyScores, err := a.targets[0].List(ctx, "blobs/md5")
+	if err != nil || len(legacyScores) != 0 {
+		t.Fatalf("new mirror unexpectedly published hash-keyed scores: count=%d err=%v", len(legacyScores), err)
+	}
 	v, err := a.Verify(ctx, 0)
 	if err != nil {
 		t.Fatalf("verify: %v (%+v)", err, v)
@@ -253,6 +262,13 @@ func TestReconcileLifecycleAndRecovery(t *testing.T) {
 	}
 	if !r.Changed || r.ReleaseID == initial {
 		t.Fatalf("revision not published: %+v", r)
+	}
+	revisedScore, err := a.targets[0].Stat(ctx, scoreKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revisedScore.Generation == initialScore.Generation {
+		t.Fatal("score revision did not replace the stable flat object generation")
 	}
 
 	up.set("PGS000002", "second-v1", "custom", true)
@@ -744,7 +760,7 @@ func TestPrunePartialsBoundsRetainedRestartFiles(t *testing.T) {
 	if _, err := os.Stat(obsolete); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("obsolete checksum partial remains: %v", err)
 	}
-	order := a.blobJobOrder(entries)
+	order := a.scoreJobOrder(entries)
 	if order[0] != 1 || order[1] != 2 {
 		t.Fatalf("retained partials were not prioritized: %v", order)
 	}

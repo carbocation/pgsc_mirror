@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -20,7 +21,7 @@ import (
 	"github.com/carbocation/pgsc_mirror/pkg/scoreheader"
 )
 
-func (a *App) ensureBlobs(ctx context.Context, entries []model.Entry) error {
+func (a *App) ensureScores(ctx context.Context, entries []model.Entry) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	jobs := make(chan int)
@@ -38,7 +39,7 @@ func (a *App) ensureBlobs(ctx context.Context, entries []model.Entry) error {
 				if entries[i].Status != model.StatusReady {
 					continue
 				}
-				if err := a.ensureBlob(ctx, &entries[i]); err != nil {
+				if err := a.ensureScore(ctx, &entries[i]); err != nil {
 					select {
 					case errCh <- fmt.Errorf("%s: %w", entries[i].PGSID, err):
 						cancel()
@@ -53,7 +54,7 @@ func (a *App) ensureBlobs(ctx context.Context, entries []model.Entry) error {
 	}
 	go func() {
 		defer close(jobs)
-		for _, i := range a.blobJobOrder(entries) {
+		for _, i := range a.scoreJobOrder(entries) {
 			select {
 			case jobs <- i:
 			case <-ctx.Done():
@@ -70,7 +71,7 @@ func (a *App) ensureBlobs(ctx context.Context, entries []model.Entry) error {
 	}
 }
 
-func (a *App) blobJobOrder(entries []model.Entry) []int {
+func (a *App) scoreJobOrder(entries []model.Entry) []int {
 	withPartial := make([]int, 0, len(entries))
 	withoutPartial := make([]int, 0, len(entries))
 	for i := range entries {
@@ -83,31 +84,45 @@ func (a *App) blobJobOrder(entries []model.Entry) []int {
 	return append(withPartial, withoutPartial...)
 }
 
-func (a *App) ensureBlob(ctx context.Context, e *model.Entry) error {
-	missing := make([]target, 0)
+type scoreDestination struct {
+	target target
+	info   store.ObjectInfo
+	exists bool
+}
+
+func (a *App) ensureScore(ctx context.Context, e *model.Entry) error {
+	destinations := make([]scoreDestination, 0)
 	var source target
 	var sourceInfo store.ObjectInfo
 	for _, t := range a.targets {
-		info, err := t.Stat(ctx, e.BlobKey)
+		info, err := t.Stat(ctx, e.ScoreKey)
 		if err == nil {
-			if source.Store == nil {
-				source = t
-				sourceInfo = info
+			matches, err := scoreObjectMatches(ctx, t.Store, info, *e)
+			if err != nil {
+				return err
 			}
-			if t.kind == "gcs" {
-				e.GCSGeneration = info.Generation
+			if matches {
+				if source.Store == nil {
+					source = t
+					sourceInfo = info
+				}
+				if t.kind == "gcs" {
+					e.GCSGeneration = info.Generation
+				}
+				if e.SizeBytes == 0 {
+					e.SizeBytes = info.Size
+				}
+				continue
 			}
-			if e.SizeBytes == 0 {
-				e.SizeBytes = info.Size
-			}
+			destinations = append(destinations, scoreDestination{target: t, info: info, exists: true})
 			continue
 		}
 		if !errors.Is(err, store.ErrNotFound) {
 			return err
 		}
-		missing = append(missing, t)
+		destinations = append(destinations, scoreDestination{target: t})
 	}
-	if len(missing) == 0 {
+	if len(destinations) == 0 {
 		if !e.Header.Current() {
 			if err := inspectStoredHeader(ctx, source.Store, e); err != nil {
 				return err
@@ -122,20 +137,28 @@ func (a *App) ensureBlob(ctx context.Context, e *model.Entry) error {
 				return err
 			}
 		}
-		for _, dst := range missing {
-			r, _, err := source.Open(ctx, e.BlobKey)
+		for _, destination := range destinations {
+			r, _, err := source.Open(ctx, e.ScoreKey)
 			if err != nil {
 				return err
 			}
-			info, err := dst.Put(ctx, e.BlobKey, r, store.PutOptions{DoesNotExist: true, ContentType: "application/gzip"})
-			r.Close()
+			info, putErr := destination.target.Put(ctx, e.ScoreKey, r, scorePutOptions(*e, destination))
+			closeErr := r.Close()
+			err = errors.Join(putErr, closeErr)
 			if errors.Is(err, store.ErrPrecondition) {
-				info, err = dst.Stat(ctx, e.BlobKey)
+				info, err = destination.target.Stat(ctx, e.ScoreKey)
+				if err == nil {
+					var matches bool
+					matches, err = scoreObjectMatches(ctx, destination.target.Store, info, *e)
+					if err == nil && !matches {
+						err = errors.New("concurrent scoring-file write has unexpected content")
+					}
+				}
 			}
 			if err != nil {
 				return err
 			}
-			if dst.kind == "gcs" {
+			if destination.target.kind == "gcs" {
 				e.GCSGeneration = info.Generation
 			}
 			if e.SizeBytes == 0 {
@@ -145,6 +168,7 @@ func (a *App) ensureBlob(ctx context.Context, e *model.Entry) error {
 		_ = removePartial(a.partialPath(e))
 		return nil
 	}
+
 	part := a.partialPath(e)
 	result, err := a.HTTP.DownloadBounded(ctx, a.Catalog.URLs(catalogScorePath(e)), part, e.SourceMD5, a.Config.Transfer.MaxFileSize.Bytes)
 	if err != nil {
@@ -171,16 +195,22 @@ func (a *App) ensureBlob(ctx context.Context, e *model.Entry) error {
 			return err
 		}
 	}
-	for _, dst := range missing {
-		opts := store.PutOptions{DoesNotExist: true, ContentType: "application/gzip", Metadata: map[string]string{"source-md5": e.SourceMD5, "pgs-id": e.PGSID}}
-		info, err := putFile(ctx, dst.Store, e.BlobKey, result.Path, opts)
+	for _, destination := range destinations {
+		info, err := putFile(ctx, destination.target.Store, e.ScoreKey, result.Path, scorePutOptions(*e, destination))
 		if errors.Is(err, store.ErrPrecondition) {
-			info, err = dst.Stat(ctx, e.BlobKey)
+			info, err = destination.target.Stat(ctx, e.ScoreKey)
+			if err == nil {
+				var matches bool
+				matches, err = scoreObjectMatches(ctx, destination.target.Store, info, *e)
+				if err == nil && !matches {
+					err = errors.New("concurrent scoring-file write has unexpected content")
+				}
+			}
 		}
 		if err != nil {
 			return err
 		}
-		if dst.kind == "gcs" {
+		if destination.target.kind == "gcs" {
 			e.GCSGeneration = info.Generation
 		}
 	}
@@ -191,14 +221,48 @@ func (a *App) ensureBlob(ctx context.Context, e *model.Entry) error {
 	return nil
 }
 
-func inspectStoredHeader(ctx context.Context, st store.Store, e *model.Entry) error {
-	r, _, err := st.Open(ctx, e.BlobKey)
+func scorePutOptions(e model.Entry, destination scoreDestination) store.PutOptions {
+	opts := store.PutOptions{ContentType: "application/gzip", Metadata: map[string]string{"source-md5": e.SourceMD5, "pgs-id": e.PGSID}}
+	if destination.exists {
+		generation := destination.info.Generation
+		opts.GenerationMatch = &generation
+	} else {
+		opts.DoesNotExist = true
+	}
+	return opts
+}
+
+func scoreObjectMatches(ctx context.Context, st store.Store, info store.ObjectInfo, e model.Entry) (bool, error) {
+	if e.SizeBytes > 0 && info.Size != e.SizeBytes {
+		return false, nil
+	}
+	if len(info.MD5) > 0 {
+		return strings.EqualFold(hex.EncodeToString(info.MD5), e.SourceMD5), nil
+	}
+	r, _, err := st.Open(ctx, e.ScoreKey)
 	if err != nil {
-		return fmt.Errorf("open stored blob for header inspection: %w", err)
+		return false, err
+	}
+	h := md5.New()
+	n, readErr := io.Copy(h, r)
+	closeErr := r.Close()
+	if err := errors.Join(readErr, closeErr); err != nil {
+		return false, err
+	}
+	if e.SizeBytes > 0 && n != e.SizeBytes {
+		return false, nil
+	}
+	return strings.EqualFold(hex.EncodeToString(h.Sum(nil)), e.SourceMD5), nil
+}
+
+func inspectStoredHeader(ctx context.Context, st store.Store, e *model.Entry) error {
+	r, _, err := st.Open(ctx, e.ScoreKey)
+	if err != nil {
+		return fmt.Errorf("open stored score for header inspection: %w", err)
 	}
 	inspection := scoreheader.InspectGzip(r)
 	if err := r.Close(); err != nil {
-		return fmt.Errorf("close stored blob after header inspection: %w", err)
+		return fmt.Errorf("close stored score after header inspection: %w", err)
 	}
 	e.Header = &inspection
 	return nil
@@ -437,8 +501,8 @@ func syncReleaseToTarget(ctx context.Context, source, dest store.Store, p model.
 			continue
 		}
 		opts := store.PutOptions{DoesNotExist: true, ContentType: "application/gzip", Metadata: map[string]string{"source-md5": e.SourceMD5, "pgs-id": e.PGSID}}
-		if err := copyMissingObject(ctx, source, dest, e.BlobKey, e.SizeBytes, e.SourceMD5, opts); err != nil {
-			return fmt.Errorf("copy %s: %w", e.BlobKey, err)
+		if err := copyMissingObject(ctx, source, dest, e.ScoreKey, e.SizeBytes, e.SourceMD5, opts); err != nil {
+			return fmt.Errorf("copy %s: %w", e.ScoreKey, err)
 		}
 	}
 	objects := []struct {
@@ -461,12 +525,24 @@ func syncReleaseToTarget(ctx context.Context, source, dest store.Store, p model.
 func copyMissingObject(ctx context.Context, source, dest store.Store, key string, expectedSize int64, expectedMD5 string, opts store.PutOptions) error {
 	info, err := dest.Stat(ctx, key)
 	if err == nil {
-		if expectedSize <= 0 || info.Size == expectedSize {
+		matches := expectedSize <= 0 || info.Size == expectedSize
+		if matches && expectedMD5 != "" {
+			matches, err = scoreObjectMatches(ctx, dest, info, model.Entry{ScoreKey: key, SourceMD5: expectedMD5, SizeBytes: expectedSize})
+			if err != nil {
+				return err
+			}
+		}
+		if matches {
 			return nil
 		}
-		gen := info.Generation
-		if err := dest.Delete(ctx, key, store.DeleteOptions{GenerationMatch: &gen}); err != nil {
-			return fmt.Errorf("replace wrong-size object: %w", err)
+		generation := info.Generation
+		if expectedMD5 != "" {
+			opts.DoesNotExist = false
+			opts.GenerationMatch = &generation
+		} else {
+			if err := dest.Delete(ctx, key, store.DeleteOptions{GenerationMatch: &generation}); err != nil {
+				return fmt.Errorf("replace wrong-size object: %w", err)
+			}
 		}
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return err
@@ -483,6 +559,13 @@ func copyMissingObject(ctx context.Context, source, dest store.Store, key string
 	closeErr := r.Close()
 	if errors.Is(putErr, store.ErrPrecondition) {
 		got, putErr = dest.Stat(ctx, key)
+		if putErr == nil && expectedMD5 != "" {
+			var matches bool
+			matches, putErr = scoreObjectMatches(ctx, dest, got, model.Entry{ScoreKey: key, SourceMD5: expectedMD5, SizeBytes: expectedSize})
+			if putErr == nil && !matches {
+				putErr = errors.New("concurrent target repair has unexpected scoring-file content")
+			}
+		}
 	}
 	if err := errors.Join(putErr, closeErr); err != nil {
 		return err
@@ -490,10 +573,16 @@ func copyMissingObject(ctx context.Context, source, dest store.Store, key string
 	if expectedSize > 0 && got.Size != expectedSize {
 		return fmt.Errorf("copied size is %d, want %d", got.Size, expectedSize)
 	}
-	if expectedMD5 != "" && len(got.MD5) > 0 && !strings.EqualFold(hex.EncodeToString(got.MD5), expectedMD5) {
-		gen := got.Generation
-		_ = dest.Delete(ctx, key, store.DeleteOptions{GenerationMatch: &gen})
-		return fmt.Errorf("copied MD5 is %s, want %s", hex.EncodeToString(got.MD5), expectedMD5)
+	if expectedMD5 != "" {
+		matches, err := scoreObjectMatches(ctx, dest, got, model.Entry{ScoreKey: key, SourceMD5: expectedMD5, SizeBytes: expectedSize})
+		if err != nil {
+			return err
+		}
+		if !matches {
+			generation := got.Generation
+			_ = dest.Delete(ctx, key, store.DeleteOptions{GenerationMatch: &generation})
+			return fmt.Errorf("copied scoring object does not match MD5 %s", expectedMD5)
+		}
 	}
 	return nil
 }

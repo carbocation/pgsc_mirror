@@ -4,17 +4,21 @@ This document describes the preservation and recovery mechanisms behind the basi
 
 ## Object layout
 
-The preservation-critical layout is:
+The public and preservation-critical layout is:
 
 ```text
-blobs/md5/{prefix}/{md5}.txt.gz
+scores/{pgs_id}_hmPOS_GRCh38.txt.gz
 releases/{release_id}/manifest.jsonl.gz
 releases/{release_id}/metadata/pgs_scores_list.txt
 releases/{release_id}/metadata/pgs_all_metadata_scores.csv
 LATEST.json
 ```
 
-Blobs, metadata snapshots, and manifests are immutable. `LATEST.json` is the only mutable publication object.
+The flat `scores/` namespace is the ordinary consumer interface. Object names are stable and preserve the PGS Catalog basenames. New scores create new names; revisions conditionally replace an existing name and therefore create a new GCS generation. Metadata snapshots and manifests are immutable. `LATEST.json` is the mutable atomic-snapshot pointer.
+
+Each manifest entry records `score_key`, source MD5, size, and GCS generation. A consumer that only needs new or revised scoring files can list `scores/` and checkpoint `(name, generation)`. A consumer that needs an exact release pins `LATEST.json` and its manifest. Historical GCS retrieval requires Object Versioning so recorded older generations remain available; a local-only target represents the current named view.
+
+Releases created before layout version 1 used `blobs/md5/{prefix}/{md5}.txt.gz`. The first mutating run of a current binary conditionally copies those verified objects into `scores/`, publishes a successor manifest using `score_key`, and leaves the old objects for the normal retention policy. Legacy `blob_key` manifests remain readable during that transition.
 
 The mirror also carries one replaceable operational object:
 
@@ -26,7 +30,7 @@ This versioned checkpoint records the last completed checksum-sidecar audit plus
 
 ## Atomic publication
 
-A reconciliation takes a renewable provider-backed lease, verifies the MD5 of each compressed scoring file, uploads missing blobs with create-only preconditions, writes the release snapshot and manifest, and finally advances `LATEST.json` with compare-and-swap.
+A reconciliation takes a renewable provider-backed lease, verifies the MD5 of each compressed scoring file, creates a missing score or conditionally replaces a revised score generation, writes the release snapshot and manifest, and finally advances `LATEST.json` with compare-and-swap.
 
 Any failed expected object leaves the prior release current. If a multi-target run stops after the authoritative pointer advances, the next reconciliation repairs lagging targets before reporting the mirror current.
 
@@ -40,7 +44,7 @@ Successful checksum-sidecar requests are checkpointed during an interrupted inve
 
 `rebuild-state` reconstructs SQLite from immutable manifests. Ordinary reconciliation also catches the index up if publication completed before an abrupt shutdown. If the operational state is lost entirely, the mirror remains valid; rebuilding or reconciling may repeat work but does not require trusting an incomplete release.
 
-The continuous service records successful complete reconciliations in SQLite. On startup it performs an immediate catch-up and runs a full reconciliation when its configured interval became overdue during downtime. Blob verification is an explicit diagnostic operation, not scheduled maintenance: ingestion already validates the upstream MD5, GCS uploads include a server-validated CRC32C, and routine reads would duplicate the storage provider's integrity work.
+The continuous service records successful complete reconciliations in SQLite. On startup it performs an immediate catch-up and runs a full reconciliation when its configured interval became overdue during downtime. Scoring-file verification is an explicit diagnostic operation, not scheduled maintenance: ingestion already validates the upstream MD5, GCS uploads include a server-validated CRC32C, and routine reads would duplicate the storage provider's integrity work.
 
 ## Multiple processes and writer coordination
 
@@ -48,11 +52,11 @@ When GCS is enabled it is the authoritative target and is ordered first. Reconci
 
 The lease coordinates publication work, not the complete lifetime of the service. Separate processes can both perform read-only sentinel checks. Full-audit scheduling, however, is portable: a contender rereads the shared maintenance checkpoint before scheduled work and adopts a newer completed audit instead of repeating it after the lease holder finishes. Multiple active services are therefore publication-safe and sidecar-audit-aware, but still waste lightweight checks. One active service and a stopped standby remain the recommended arrangement.
 
-After a hard failure, a contender can conditionally remove an expired lease generation and acquire a new lease. If a former holder attempts to renew a stale generation, renewal fails and its reconciliation context is canceled. Immutable create-only objects and compare-and-swap updates to `LATEST.json` remain the final publication safeguards.
+After a hard failure, a contender can conditionally remove an expired lease generation and acquire a new lease. If a former holder attempts to renew a stale generation, renewal fails and its reconciliation context is canceled. Conditional score-generation writes, immutable release objects, and compare-and-swap updates to `LATEST.json` remain the final publication safeguards.
 
 ## Bounded local scratch
 
-For a GCS-only mirror, scoring files are not retained wholesale on local disk. Each worker downloads one compressed file into `state.work_dir`, verifies it, uploads it from that durable file, and removes it before taking more work.
+For a GCS-only mirror, scoring files are not retained wholesale on local disk. Each worker downloads one compressed file into `state.work_dir`, verifies it, uploads it under its flat source filename, and removes it before taking more work.
 
 `transfer.file_concurrency` bounds the number of current scoring-file partials. `transfer.max_file_size` is enforced from `Content-Length` when available and again while streaming. On restart, current partials are handled first; obsolete checksum revisions and excess old partials are pruned.
 
@@ -66,13 +70,13 @@ The classifier accepts both the usual single `effect_weight` representation and 
 
 Inspection stops at the table header and is bounded to 2 MiB or 10,000 decompressed header lines. A checksum-valid upstream anomaly is preserved byte-for-byte and marked `unrecognized` or `unreadable`; it is not silently normalized or dropped.
 
-Unchanged blobs reuse their versioned observation. `LATEST.json` records the completed inspector version so the service can detect older observations.
+Unchanged scoring files reuse their versioned observation. `LATEST.json` records the completed inspector version so the service can detect older observations.
 
 ## Stored-object annotation
 
-`annotate` refreshes versioned descriptive metadata exclusively from objects already owned by the mirror. It pins the current immutable release, reads its stored blobs and metadata snapshots, and publishes a new immutable manifest and pointer only after every required inspection succeeds. It never calls the PGS Catalog inventory, metadata, sidecar, or scoring-file endpoints.
+`annotate` refreshes versioned descriptive metadata exclusively from objects already owned by the mirror. It pins the current manifest release, reads its stored scoring files and metadata snapshots, and publishes a new immutable manifest and pointer only after every required inspection succeeds. It never calls the PGS Catalog inventory, metadata, sidecar, or scoring-file endpoints.
 
-Header inspection is the first annotation implemented through this path. An older release with absent or stale header observations can therefore be upgraded without a complete upstream reconciliation. The long-lived service performs this refresh automatically before its normal lightweight update check when the current pointer advertises an older inspector version. A newer binary may publish an annotation-only successor whose raw blob MD5s and stored upstream snapshots are identical to its predecessor.
+Header inspection is the first annotation implemented through this path. An older release with absent or stale header observations can therefore be upgraded without a complete upstream reconciliation. The long-lived service performs this refresh automatically before its normal lightweight update check when the current pointer advertises an older inspector version. A newer binary may publish an annotation-only successor whose raw score MD5s and stored upstream snapshots are identical to its predecessor.
 
 Dry-run mode performs the stored reads and reports the result but acquires no lease and writes no objects. Interactive annotation commands report periodic progress on stderr and include complete observations for every unrecognized, unreadable, or warning-bearing header in the final human or JSON report. A real run uses the same renewable publication lease as reconciliation, repairs lagging configured targets first, and advances pointers with compare-and-swap. Any unreadable gzip is recorded as an explicit descriptive result; an operational read or publication failure leaves the prior release current. A binary refuses to publish over annotation data produced by a newer inspector version.
 

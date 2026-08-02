@@ -43,13 +43,13 @@ func seedLegacyRelease(t *testing.T, a *App, now time.Time, fixtures ...annotati
 			SourceURL:   "https://upstream.invalid/" + fixture.PGSID + ".txt.gz",
 			SourceMD5:   sum,
 			SizeBytes:   int64(len(fixture.Data)),
-			BlobKey:     model.BlobKey(sum),
+			ScoreKey:    model.ScoreKey(fixture.PGSID, "GRCh38"),
 			FirstSeenAt: now,
 			LastSeenAt:  now,
 			Status:      model.StatusReady,
 			License:     "test",
 		}
-		if err := putImmutable(ctx, a.targets[0].Store, entry.BlobKey, fixture.Data, store.PutOptions{DoesNotExist: true}); err != nil {
+		if err := putImmutable(ctx, a.targets[0].Store, entry.ScoreKey, fixture.Data, store.PutOptions{DoesNotExist: true}); err != nil {
 			t.Fatal(err)
 		}
 		entries = append(entries, entry)
@@ -68,14 +68,15 @@ func seedLegacyRelease(t *testing.T, a *App, now time.Time, fixtures ...annotati
 	scoreSum := sha256.Sum256(scoreList)
 	metadataSum := sha256.Sum256(metadata)
 	pointer := model.Pointer{
-		ReleaseID:       releaseID,
-		ManifestKey:     model.ManifestKey(releaseID),
-		ManifestSHA256:  manifestSHA,
-		ScoreListSHA256: hex.EncodeToString(scoreSum[:]),
-		MetadataSHA256:  hex.EncodeToString(metadataSum[:]),
-		PublishedAt:     now,
-		EntryCount:      len(entries),
-		GenomeBuild:     "GRCh38",
+		ReleaseID:          releaseID,
+		ManifestKey:        model.ManifestKey(releaseID),
+		ManifestSHA256:     manifestSHA,
+		ScoreListSHA256:    hex.EncodeToString(scoreSum[:]),
+		MetadataSHA256:     hex.EncodeToString(metadataSum[:]),
+		PublishedAt:        now,
+		EntryCount:         len(entries),
+		GenomeBuild:        "GRCh38",
+		ScoreLayoutVersion: model.ScoreLayoutVersion,
 	}
 	if err := a.publish(ctx, pointer, scoreList, metadata, manifestBytes); err != nil {
 		t.Fatal(err)
@@ -263,7 +264,7 @@ func TestAnnotateStoredObjectFailureDoesNotAdvancePointer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.targets[0].Store = &openFailureStore{Store: a.targets[0].Store, key: entries[0].BlobKey}
+	a.targets[0].Store = &openFailureStore{Store: a.targets[0].Store, key: entries[0].ScoreKey}
 
 	report, err := a.Annotate(context.Background(), false)
 	if err == nil || report.Available != 2 || report.Inspected != 2 || report.Updated != 1 || report.Failed != 1 || len(report.Failures) != 1 {

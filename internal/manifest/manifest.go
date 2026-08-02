@@ -26,13 +26,13 @@ func sorted(entries []model.Entry) []model.Entry {
 // ReleaseID combines a UTC timestamp with a digest of the desired logical state.
 func ReleaseID(now time.Time, entries []model.Entry, snapshots ...[]byte) (string, error) {
 	type seed struct {
-		PGSID, GenomeBuild, SourceURL, SourceMD5, BlobKey, Status, License string
-		SizeBytes                                                          int64
-		Header                                                             *scoreheader.Inspection
+		PGSID, GenomeBuild, SourceURL, SourceMD5, ScoreKey, Status, License string
+		SizeBytes                                                           int64
+		Header                                                              *scoreheader.Inspection
 	}
 	ss := make([]seed, 0, len(entries))
 	for _, e := range sorted(entries) {
-		ss = append(ss, seed{e.PGSID, e.GenomeBuild, e.SourceURL, e.SourceMD5, e.BlobKey, e.Status, e.License, e.SizeBytes, e.Header})
+		ss = append(ss, seed{e.PGSID, e.GenomeBuild, e.SourceURL, e.SourceMD5, e.ScoreKey, e.Status, e.License, e.SizeBytes, e.Header})
 	}
 	b, err := json.Marshal(ss)
 	if err != nil {

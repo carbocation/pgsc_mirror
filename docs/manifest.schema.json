@@ -6,7 +6,7 @@
   "additionalProperties": false,
   "required": [
     "release_id", "pgs_id", "genome_build", "source_url", "source_md5",
-    "size_bytes", "blob_key", "first_seen_at", "last_seen_at", "status"
+    "size_bytes", "score_key", "first_seen_at", "last_seen_at", "status"
   ],
   "properties": {
     "release_id": {"type": "string", "pattern": "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$"},
@@ -15,7 +15,7 @@
     "source_url": {"type": "string", "format": "uri"},
     "source_md5": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
     "size_bytes": {"type": "integer", "minimum": 0},
-    "blob_key": {"type": "string", "pattern": "^blobs/md5/[0-9a-f]{2}/[0-9a-f]{32}\\.txt\\.gz$"},
+    "score_key": {"type": "string", "pattern": "^scores/PGS[0-9]{6}_hmPOS_GRCh38\\.txt\\.gz$"},
     "upstream_etag": {"type": "string"},
     "upstream_last_modified": {"type": "string"},
     "first_seen_at": {"type": "string", "format": "date-time"},
