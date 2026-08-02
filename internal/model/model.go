@@ -2,7 +2,6 @@
 package model
 
 import (
-	"encoding/json"
 	"path"
 	"time"
 
@@ -10,11 +9,12 @@ import (
 )
 
 const (
-	LatestKey      = "LATEST.json"
-	LeaseKey       = "leases/reconcile.json"
-	MaintenanceKey = "operations/maintenance.json"
-	StatusReady    = "available"
-	StatusGone     = "withdrawn"
+	LatestKey            = "LATEST.json"
+	LatestManifestTSVKey = "LATEST.manifest.tsv"
+	LeaseKey             = "leases/reconcile.json"
+	MaintenanceKey       = "operations/maintenance.json"
+	StatusReady          = "available"
+	StatusGone           = "withdrawn"
 	// ScoreLayoutVersion identifies the flat, source-named scoring-file layout.
 	ScoreLayoutVersion = 1
 )
@@ -41,6 +41,8 @@ type Pointer struct {
 	ReleaseID              string    `json:"release_id"`
 	ManifestKey            string    `json:"manifest_key"`
 	ManifestSHA256         string    `json:"manifest_sha256"`
+	ManifestTSVKey         string    `json:"manifest_tsv_key,omitempty"`
+	ManifestTSVSHA256      string    `json:"manifest_tsv_sha256,omitempty"`
 	ScoreListSHA256        string    `json:"score_list_sha256,omitempty"`
 	MetadataSHA256         string    `json:"metadata_sha256,omitempty"`
 	PublishedAt            time.Time `json:"published_at"`
@@ -63,36 +65,12 @@ func ScoreKey(pgsID, genomeBuild string) string {
 	return path.Join("scores", pgsID+"_hmPOS_"+genomeBuild+".txt.gz")
 }
 
-// LegacyBlobKey identifies the content-addressed layout used by releases
-// published before ScoreLayoutVersion 1. It is retained only for migrations
-// and backwards-compatible manifest reads.
-func LegacyBlobKey(md5sum string) string {
-	prefix := "00"
-	if len(md5sum) >= 2 {
-		prefix = md5sum[:2]
-	}
-	return "blobs/md5/" + prefix + "/" + md5sum + ".txt.gz"
-}
-
-// UnmarshalJSON accepts both current score_key manifests and legacy blob_key
-// manifests. Newly encoded entries contain only score_key.
-func (e *Entry) UnmarshalJSON(data []byte) error {
-	type entry Entry
-	wire := struct {
-		*entry
-		LegacyBlobKey string `json:"blob_key"`
-	}{entry: (*entry)(e)}
-	if err := json.Unmarshal(data, &wire); err != nil {
-		return err
-	}
-	if e.ScoreKey == "" {
-		e.ScoreKey = wire.LegacyBlobKey
-	}
-	return nil
-}
-
 func ManifestKey(releaseID string) string {
 	return "releases/" + releaseID + "/manifest.jsonl.gz"
+}
+
+func ManifestTSVKey(releaseID string) string {
+	return "releases/" + releaseID + "/manifest.tsv"
 }
 
 func MetadataKey(releaseID string) string {

@@ -50,13 +50,6 @@ type FilePutter interface {
 	PutFile(context.Context, string, string, PutOptions) (ObjectInfo, error)
 }
 
-// Copier allows a provider to make a conditional server-side copy within the
-// same store. Migrations use it to rename large objects without routing their
-// bytes through the pgsc-mirror process.
-type Copier interface {
-	Copy(context.Context, string, string, PutOptions) (ObjectInfo, error)
-}
-
 // StagingCleaner removes provider staging files left by a terminated process.
 // It is called only after the reconciliation lease has been acquired.
 type StagingCleaner interface {

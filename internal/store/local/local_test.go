@@ -94,7 +94,7 @@ func TestCleanupStagingRemovesOnlyAtomicWritePartials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir := filepath.Join(s.root, "blobs", "md5")
+	dir := filepath.Join(s.root, "scores")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}

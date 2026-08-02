@@ -11,6 +11,14 @@ scores/PGS000002_hmPOS_GRCh38.txt.gz
 
 A basic consumer can periodically list `scores/` and checkpoint each object's name and GCS generation: a new name is a newly mirrored score, while a new generation of an existing name is an upstream revision. The release manifest is optional for this workflow. Consumers use it when they need an atomic snapshot, checksums, licensing, withdrawal status, or exact provenance.
 
+The current manifest is also available as a directly readable TSV:
+
+```bash
+gcloud storage cat gs://BUCKET/PREFIX/LATEST.manifest.tsv | column -ts $'\t' | less -S
+```
+
+For an exact snapshot, read `LATEST.json` and use its immutable `manifest_tsv_key` and `manifest_tsv_sha256`.
+
 ## Quick start
 
 Start with the example configuration:

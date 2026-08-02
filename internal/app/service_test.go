@@ -383,7 +383,7 @@ func TestServiceRetriesAfterOperationalFailure(t *testing.T) {
 	}
 }
 
-func TestServiceDoesNotScheduleBlobVerification(t *testing.T) {
+func TestServiceDoesNotScheduleScoringFileVerification(t *testing.T) {
 	up := newSyntheticUpstream()
 	up.set("PGS000001", harmonizedHeaderFixture, "CC0", true)
 	srv := httptest.NewServer(up)

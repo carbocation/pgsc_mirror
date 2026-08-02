@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/carbocation/pgsc_mirror/internal/config"
+	"github.com/carbocation/pgsc_mirror/internal/manifest"
 	"github.com/carbocation/pgsc_mirror/internal/model"
 	"github.com/carbocation/pgsc_mirror/internal/store"
 	localstore "github.com/carbocation/pgsc_mirror/internal/store/local"
@@ -224,9 +225,30 @@ func TestReconcileLifecycleAndRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("flat score was not published: %v", err)
 	}
-	legacyScores, err := a.targets[0].List(ctx, "blobs/md5")
-	if err != nil || len(legacyScores) != 0 {
-		t.Fatalf("new mirror unexpectedly published hash-keyed scores: count=%d err=%v", len(legacyScores), err)
+	pointer, _, err := a.latest(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pointer.ManifestTSVKey != model.ManifestTSVKey(initial) || pointer.ManifestTSVSHA256 == "" {
+		t.Fatalf("LATEST does not pin the release manifest TSV: %+v", pointer)
+	}
+	releaseTSV, _, err := a.targets[0].Open(ctx, pointer.ManifestTSVKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseTSVBytes, err := io.ReadAll(releaseTSV)
+	releaseTSV.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	latestTSV, _, err := a.targets[0].Open(ctx, model.LatestManifestTSVKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	latestTSVBytes, err := io.ReadAll(latestTSV)
+	latestTSV.Close()
+	if err != nil || !bytes.Equal(releaseTSVBytes, latestTSVBytes) || !bytes.Contains(latestTSVBytes, []byte("release_id\tpgs_id\t")) || !bytes.Contains(latestTSVBytes, []byte(initial+"\tPGS000001\t")) {
+		t.Fatalf("latest manifest TSV is not the readable release copy: err=%v\n%s", err, latestTSVBytes)
 	}
 	v, err := a.Verify(ctx, 0)
 	if err != nil {
@@ -423,6 +445,89 @@ func TestReconcileLifecycleAndRecovery(t *testing.T) {
 	}
 	if status.State.Available != 2 || status.State.LatestRelease == "" {
 		t.Fatalf("bad rebuilt status %+v", status)
+	}
+}
+
+func TestUpdateBackfillsManifestTSVForCurrentRelease(t *testing.T) {
+	up := newSyntheticUpstream()
+	up.set("PGS000001", "first-v1", "CC0", true)
+	srv := httptest.NewServer(up)
+	defer srv.Close()
+	a, err := New(context.Background(), integrationConfig(t.TempDir(), srv.URL), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	ctx := context.Background()
+	if _, err := a.Reconcile(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	pointer, pointerInfo, err := a.readPointer(ctx, a.targets[0].Store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{pointer.ManifestTSVKey, model.LatestManifestTSVKey} {
+		info, err := a.targets[0].Stat(ctx, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		generation := info.Generation
+		if err := a.targets[0].Delete(ctx, key, store.DeleteOptions{GenerationMatch: &generation}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pointer.ManifestTSVKey = ""
+	pointer.ManifestTSVSHA256 = ""
+	pointerBytes, err := manifest.PointerJSON(pointer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation := pointerInfo.Generation
+	if _, err := a.targets[0].Put(ctx, model.LatestKey, bytes.NewReader(pointerBytes), store.PutOptions{GenerationMatch: &generation, ContentType: "application/json"}); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := a.Update(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Changed {
+		t.Fatalf("manifest TSV backfill was not reported: %+v", report)
+	}
+	current, _, err := a.latest(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.ManifestTSVKey == "" || current.ManifestTSVSHA256 == "" {
+		t.Fatalf("manifest TSV identity was not restored: %+v", current)
+	}
+	if _, err := a.Verify(ctx, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	latestTSV, latestInfo, err := a.targets[0].Open(ctx, model.LatestManifestTSVKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	corrupt, err := io.ReadAll(latestTSV)
+	latestTSV.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	corrupt[0] ^= 1
+	generation = latestInfo.Generation
+	if _, err := a.targets[0].Put(ctx, model.LatestManifestTSVKey, bytes.NewReader(corrupt), store.PutOptions{GenerationMatch: &generation, ContentType: "text/tab-separated-values; charset=utf-8"}); err != nil {
+		t.Fatal(err)
+	}
+	repaired, err := a.Update(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !repaired.Changed {
+		t.Fatalf("same-size latest TSV corruption was not repaired: %+v", repaired)
+	}
+	if _, err := a.Verify(ctx, 0); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -623,7 +728,7 @@ func TestReconcileReusesVerifiedDownloadAfterUploadFailure(t *testing.T) {
 	original := a.targets[0].Store
 	a.targets[0].Store = &failingStore{Store: original, failSuffix: ".txt.gz"}
 	if _, err := a.Reconcile(context.Background(), false); err == nil {
-		t.Fatal("injected blob upload failure succeeded")
+		t.Fatal("injected score upload failure succeeded")
 	}
 	partials, err := filepath.Glob(filepath.Join(a.Config.State.WorkDir, "partials", "*.part"))
 	if err != nil || len(partials) != 1 {

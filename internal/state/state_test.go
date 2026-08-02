@@ -2,12 +2,43 @@ package state
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/carbocation/pgsc_mirror/internal/model"
 )
+
+func TestOpenResetsUnversionedOperationalSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	raw, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`CREATE TABLE scores (obsolete TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := time.Now().UTC()
+	entry := model.Entry{ReleaseID: "r1", PGSID: "PGS000001", GenomeBuild: "GRCh38", ScoreKey: model.ScoreKey("PGS000001", "GRCh38"), FirstSeenAt: now, LastSeenAt: now, Status: model.StatusReady}
+	pointer := model.Pointer{ReleaseID: "r1", ManifestKey: model.ManifestKey("r1"), PublishedAt: now, EntryCount: 1}
+	if err := db.RecordRelease(context.Background(), pointer, []model.Entry{entry}); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := db.Summary(context.Background())
+	if err != nil || summary.LatestRelease != "r1" || summary.Entries != 1 {
+		t.Fatalf("reset state is unusable: summary=%+v err=%v", summary, err)
+	}
+}
 
 func TestRecordAndRebuild(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "state.db"))
@@ -19,7 +50,7 @@ func TestRecordAndRebuild(t *testing.T) {
 	now := time.Now().UTC()
 	e := model.Entry{ReleaseID: "r1", PGSID: "PGS000001", GenomeBuild: "GRCh38", SourceMD5: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ScoreKey: model.ScoreKey("PGS000001", "GRCh38"), Status: model.StatusReady, FirstSeenAt: now, LastSeenAt: now}
 	p := model.Pointer{ReleaseID: "r1", ManifestKey: model.ManifestKey("r1"), ManifestSHA256: "abc", PublishedAt: now, EntryCount: 1}
-	if err := db.RecordRelease(ctx, p, []model.Entry{e}, true); err != nil {
+	if err := db.RecordRelease(ctx, p, []model.Entry{e}); err != nil {
 		t.Fatal(err)
 	}
 	s, err := db.Summary(ctx)

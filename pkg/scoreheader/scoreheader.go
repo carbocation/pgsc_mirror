@@ -16,7 +16,7 @@ import (
 const (
 	// InspectorVersion changes when classification or fingerprint semantics
 	// change. Mirrors can use it to decide whether stored observations need to
-	// be refreshed from their immutable blobs.
+	// be refreshed from their stored scoring files.
 	InspectorVersion = 2
 
 	StatusRecognized   = "recognized"

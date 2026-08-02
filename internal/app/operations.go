@@ -41,6 +41,23 @@ func (a *App) Verify(ctx context.Context, sample int) (VerifyReport, error) {
 			failed = true
 			continue
 		}
+		expectedPointer, _, err := attachManifestTSV(p, entries)
+		if err != nil {
+			result.Failures = append(result.Failures, "manifest TSV: "+err.Error())
+			failed = true
+		} else if p.ManifestTSVKey != expectedPointer.ManifestTSVKey || p.ManifestTSVSHA256 != expectedPointer.ManifestTSVSHA256 {
+			result.Failures = append(result.Failures, "manifest TSV identity is missing or differs from the rendered manifest")
+			failed = true
+		} else {
+			if err := verifySnapshot(ctx, t.Store, p.ManifestTSVKey, p.ManifestTSVSHA256); err != nil {
+				result.Failures = append(result.Failures, "release manifest TSV: "+err.Error())
+				failed = true
+			}
+			if err := verifySnapshot(ctx, t.Store, model.LatestManifestTSVKey, p.ManifestTSVSHA256); err != nil {
+				result.Failures = append(result.Failures, "latest manifest TSV: "+err.Error())
+				failed = true
+			}
+		}
 		if err := verifySnapshot(ctx, t.Store, model.ScoreListKey(p.ReleaseID), p.ScoreListSHA256); err != nil {
 			result.Failures = append(result.Failures, "score list: "+err.Error())
 			failed = true
@@ -146,6 +163,17 @@ func (a *App) Pull(ctx context.Context, dryRun bool) (RunReport, error) {
 	if err != nil {
 		return RunReport{}, err
 	}
+	expectedPointer, manifestTSV, err := attachManifestTSV(p, entries)
+	if err != nil {
+		return RunReport{}, err
+	}
+	if p.ManifestTSVKey != expectedPointer.ManifestTSVKey || p.ManifestTSVSHA256 != expectedPointer.ManifestTSVSHA256 {
+		return RunReport{}, errors.New("source release does not publish the manifest TSV contract; run update against GCS first")
+	}
+	if err := verifySnapshot(ctx, source.Store, p.ManifestTSVKey, p.ManifestTSVSHA256); err != nil {
+		return RunReport{}, fmt.Errorf("source release manifest TSV: %w", err)
+	}
+	p = expectedPointer
 	if dryRun {
 		return RunReport{Command: "pull", ReleaseID: p.ReleaseID, Changed: true, Message: fmt.Sprintf("dry run; would make %d manifest entries available locally", len(entries))}, nil
 	}
@@ -206,6 +234,9 @@ func (a *App) Pull(ctx context.Context, dryRun bool) (RunReport, error) {
 	if err := putImmutable(ctx, dest.Store, p.ManifestKey, manifestBytes, store.PutOptions{DoesNotExist: true, ContentType: "application/gzip", Metadata: map[string]string{"format": "jsonl"}}); err != nil {
 		return RunReport{}, err
 	}
+	if err := putImmutable(ctx, dest.Store, p.ManifestTSVKey, manifestTSV, store.PutOptions{DoesNotExist: true, ContentType: "text/tab-separated-values; charset=utf-8", Metadata: map[string]string{"format": "tsv", "release-id": p.ReleaseID, "sha256": p.ManifestTSVSHA256}}); err != nil {
+		return RunReport{}, err
+	}
 	pointerBytes, _ := manifest.PointerJSON(p)
 	_, oldInfo, readErr := a.readPointer(ctx, dest.Store)
 	opts := store.PutOptions{ContentType: "application/json"}
@@ -220,8 +251,11 @@ func (a *App) Pull(ctx context.Context, dryRun bool) (RunReport, error) {
 	if _, err := dest.Put(ctx, model.LatestKey, bytes.NewReader(pointerBytes), opts); err != nil {
 		return RunReport{}, err
 	}
+	if _, err := putReplaceable(ctx, dest.Store, model.LatestManifestTSVKey, manifestTSV, store.PutOptions{ContentType: "text/tab-separated-values; charset=utf-8", Metadata: map[string]string{"format": "tsv", "release-id": p.ReleaseID, "sha256": p.ManifestTSVSHA256}}); err != nil {
+		return RunReport{}, err
+	}
 	if a.State != nil {
-		if err := a.State.RecordRelease(ctx, p, entries, true); err != nil {
+		if err := a.State.RecordRelease(ctx, p, entries); err != nil {
 			return RunReport{}, err
 		}
 	}
@@ -300,6 +334,17 @@ func (a *App) RebuildState(ctx context.Context, dryRun bool) (RunReport, error) 
 	if err != nil {
 		return RunReport{}, err
 	}
+	latestEntries, _, err := a.readManifest(ctx, t.Store, latest)
+	if err != nil {
+		return RunReport{}, err
+	}
+	expectedLatest, _, err := attachManifestTSV(latest, latestEntries)
+	if err != nil {
+		return RunReport{}, err
+	}
+	if latest.ManifestTSVKey != expectedLatest.ManifestTSVKey || latest.ManifestTSVSHA256 != expectedLatest.ManifestTSVSHA256 {
+		return RunReport{}, errors.New("current release does not publish the manifest TSV contract; run update first")
+	}
 	objects, err := t.List(ctx, "releases")
 	if err != nil {
 		return RunReport{}, err
@@ -340,7 +385,27 @@ func (a *App) RebuildState(ctx context.Context, dryRun bool) (RunReport, error) 
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return RunReport{}, err
 		}
-		p := model.Pointer{ReleaseID: id, ManifestKey: obj.Key, ManifestSHA256: hex.EncodeToString(sum[:]), ScoreListSHA256: scoreSHA, MetadataSHA256: metadataSHA, PublishedAt: published, EntryCount: len(entries), GenomeBuild: a.Config.GenomeBuild, HeaderInspectorVersion: observedHeaderInspectorVersion(entries), ScoreLayoutVersion: observedScoreLayoutVersion(entries)}
+		p := model.Pointer{ReleaseID: id, ManifestKey: obj.Key, ManifestSHA256: hex.EncodeToString(sum[:]), ScoreListSHA256: scoreSHA, MetadataSHA256: metadataSHA, PublishedAt: published, EntryCount: len(entries), GenomeBuild: a.Config.GenomeBuild, HeaderInspectorVersion: observedHeaderInspectorVersion(entries), ScoreLayoutVersion: model.ScoreLayoutVersion}
+		if err := requireCurrentScoreLayout(p, entries); err != nil {
+			continue
+		}
+		p, _, err = attachManifestTSV(p, entries)
+		if err != nil {
+			return RunReport{}, err
+		}
+		manifestTSVSHA, err := objectSHA256(ctx, t.Store, p.ManifestTSVKey)
+		if errors.Is(err, store.ErrNotFound) {
+			if id == latest.ReleaseID {
+				return RunReport{}, errors.New("current release manifest TSV is missing")
+			}
+			continue
+		}
+		if err != nil {
+			return RunReport{}, err
+		}
+		if manifestTSVSHA != p.ManifestTSVSHA256 {
+			return RunReport{}, fmt.Errorf("%s manifest TSV SHA-256 is %s, want %s", id, manifestTSVSHA, p.ManifestTSVSHA256)
+		}
 		releases = append(releases, state.RebuildRelease{Pointer: p, Entries: entries})
 	}
 	sort.Slice(releases, func(i, j int) bool {
@@ -380,13 +445,6 @@ func observedHeaderInspectorVersion(entries []model.Entry) int {
 		}
 	}
 	return version
-}
-
-func observedScoreLayoutVersion(entries []model.Entry) int {
-	if scoreLayoutMigrationsNeeded(entries) == 0 {
-		return model.ScoreLayoutVersion
-	}
-	return 0
 }
 
 func objectSHA256(ctx context.Context, st store.Store, key string) (string, error) {
@@ -475,15 +533,13 @@ func (a *App) GC(ctx context.Context, apply bool) (GCReport, error) {
 				refs[e.ScoreKey] = true
 			}
 		}
-		for _, prefix := range []string{"scores", "blobs/md5"} {
-			objects, err := t.List(ctx, prefix)
-			if err != nil {
-				return report, err
-			}
-			for _, obj := range objects {
-				if !refs[obj.Key] && obj.LastModified.Before(cutoff) {
-					report.Items = append(report.Items, GCItem{Target: t.Name(), Key: obj.Key, Reason: "unreferenced scoring object past grace period", Size: obj.Size})
-				}
+		scores, err := t.List(ctx, "scores")
+		if err != nil {
+			return report, err
+		}
+		for _, obj := range scores {
+			if !refs[obj.Key] && obj.LastModified.Before(cutoff) {
+				report.Items = append(report.Items, GCItem{Target: t.Name(), Key: obj.Key, Reason: "unreferenced scoring object past grace period", Size: obj.Size})
 			}
 		}
 		if apply {

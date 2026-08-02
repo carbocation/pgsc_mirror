@@ -17,7 +17,7 @@ import (
 
 const harmonizedHeaderFixture = "###PGS CATALOG SCORING FILE\n#format_version=2.0\n#pgs_id=PGS000001\n##HARMONIZATION DETAILS\n#HmPOS_build=GRCh38\nrsID\teffect_allele\tother_allele\teffect_weight\thm_source\thm_rsID\thm_chr\thm_pos\nrs1\tA\tG\t0.25\tENSEMBL\trs1\t1\t42\n"
 
-func TestEnsureBlobAnnotatesHeaderFromStoredObject(t *testing.T) {
+func TestEnsureScoreAnnotatesHeaderFromStoredObject(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	ls, err := localstore.New(root)
@@ -47,7 +47,7 @@ func TestEnsureBlobAnnotatesHeaderFromStoredObject(t *testing.T) {
 	}
 }
 
-func TestUpdateAnnotatesLegacyManifestHeader(t *testing.T) {
+func TestUpdateAnnotatesOutdatedManifestHeader(t *testing.T) {
 	up := newSyntheticUpstream()
 	up.set("PGS000001", harmonizedHeaderFixture, "CC0", true)
 	srv := httptest.NewServer(up)
@@ -63,10 +63,10 @@ func TestUpdateAnnotatesLegacyManifestHeader(t *testing.T) {
 
 	data := gzipFixture(harmonizedHeaderFixture)
 	sum := md5hex(data)
-	legacyID := "20260801T100000Z-000000000000"
+	sourceID := "20260801T100000Z-000000000000"
 	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
 	entry := model.Entry{
-		ReleaseID:   legacyID,
+		ReleaseID:   sourceID,
 		PGSID:       "PGS000001",
 		GenomeBuild: "GRCh38",
 		SourceURL:   srv.URL + "/root/scores/PGS000001/ScoringFiles/Harmonized/PGS000001_hmPOS_GRCh38.txt.gz",
@@ -85,13 +85,17 @@ func TestUpdateAnnotatesLegacyManifestHeader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pointer := model.Pointer{ReleaseID: legacyID, ManifestKey: model.ManifestKey(legacyID), ManifestSHA256: manifestSHA, PublishedAt: now, EntryCount: 1, GenomeBuild: "GRCh38"}
-	scoreList := []byte("PGS000001\n")
-	metadata := []byte("pgs_id,license,note\nPGS000001,CC0,\n")
-	if err := a.publish(ctx, pointer, scoreList, metadata, manifestBytes); err != nil {
+	pointer := model.Pointer{ReleaseID: sourceID, ManifestKey: model.ManifestKey(sourceID), ManifestSHA256: manifestSHA, PublishedAt: now, EntryCount: 1, GenomeBuild: "GRCh38", ScoreLayoutVersion: model.ScoreLayoutVersion}
+	pointer, manifestTSV, err := attachManifestTSV(pointer, []model.Entry{entry})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.State.RecordRelease(ctx, pointer, []model.Entry{entry}, true); err != nil {
+	scoreList := []byte("PGS000001\n")
+	metadata := []byte("pgs_id,license,note\nPGS000001,CC0,\n")
+	if err := a.publish(ctx, pointer, scoreList, metadata, manifestBytes, manifestTSV); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.State.RecordRelease(ctx, pointer, []model.Entry{entry}); err != nil {
 		t.Fatal(err)
 	}
 	a.now = func() time.Time { return now.Add(time.Minute) }
@@ -99,8 +103,8 @@ func TestUpdateAnnotatesLegacyManifestHeader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !report.Changed || report.ReleaseID == legacyID {
-		t.Fatalf("legacy header was not annotated: %+v", report)
+	if !report.Changed || report.ReleaseID == sourceID {
+		t.Fatalf("outdated header was not annotated: %+v", report)
 	}
 	_, entries, err := a.latest(ctx)
 	if err != nil {

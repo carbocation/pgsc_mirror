@@ -165,38 +165,6 @@ func (s *Store) PutFile(ctx context.Context, key, filename string, opts store.Pu
 	return s.putPrepared(ctx, key, f, crc.Sum32(), md.Sum(nil), opts)
 }
 
-// Copy performs a conditional server-side rewrite within the configured
-// bucket and prefix.
-func (s *Store) Copy(ctx context.Context, sourceKey, destinationKey string, opts store.PutOptions) (store.ObjectInfo, error) {
-	source, _, err := s.object(sourceKey)
-	if err != nil {
-		return store.ObjectInfo{}, err
-	}
-	destination, _, err := s.object(destinationKey)
-	if err != nil {
-		return store.ObjectInfo{}, err
-	}
-	conditions := storage.Conditions{}
-	if opts.DoesNotExist {
-		conditions.DoesNotExist = true
-	}
-	if opts.GenerationMatch != nil {
-		conditions.GenerationMatch = *opts.GenerationMatch
-	}
-	if opts.DoesNotExist || opts.GenerationMatch != nil {
-		destination = destination.If(conditions)
-	}
-	copier := destination.CopierFrom(source)
-	copier.ContentType = opts.ContentType
-	copier.ContentEncoding = opts.ContentEncoding
-	copier.Metadata = opts.Metadata
-	attrs, err := copier.Run(ctx)
-	if err != nil {
-		return store.ObjectInfo{}, mapError(err)
-	}
-	return objectInfo(destinationKey, attrs), nil
-}
-
 func (s *Store) putPrepared(ctx context.Context, key string, r io.Reader, crc uint32, md []byte, opts store.PutOptions) (store.ObjectInfo, error) {
 	obj, _, err := s.object(key)
 	if err != nil {

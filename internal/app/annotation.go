@@ -145,6 +145,11 @@ func (a *App) annotateCurrent(ctx context.Context, report AnnotationReport, writ
 			return report, err
 		}
 		report.RepairedTargets = repaired
+		pointer, repaired, err = a.ensureManifestTSV(ctx, pointer, entries)
+		if err != nil {
+			return report, err
+		}
+		report.RepairedTargets = report.RepairedTargets || repaired
 		if err := a.catchUpState(ctx, pointer, entries); err != nil {
 			return report, err
 		}
@@ -205,15 +210,19 @@ func (a *App) annotateCurrent(ctx context.Context, report AnnotationReport, writ
 		HeaderInspectorVersion: observedHeaderInspectorVersion(entries),
 		ScoreLayoutVersion:     pointer.ScoreLayoutVersion,
 	}
+	annotated, manifestTSV, err := attachManifestTSV(annotated, entries)
+	if err != nil {
+		return report, err
+	}
 	if report.DryRun {
 		report.Message = fmt.Sprintf("would publish stored-object annotations for %d scoring file(s); no upstream access", report.Updated)
 		return report, nil
 	}
-	if err := a.publish(ctx, annotated, scoreList, metadata, manifestBytes); err != nil {
+	if err := a.publish(ctx, annotated, scoreList, metadata, manifestBytes, manifestTSV); err != nil {
 		return report, err
 	}
 	report.ReleaseID = releaseID
-	if err := a.State.RecordRelease(ctx, annotated, entries, a.Config.Targets.Local); err != nil {
+	if err := a.State.RecordRelease(ctx, annotated, entries); err != nil {
 		return report, err
 	}
 	report.Message = fmt.Sprintf("published stored-object annotations for %d scoring file(s); no upstream access", report.Updated)

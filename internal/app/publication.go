@@ -407,7 +407,7 @@ func (a *App) convergeTargets(ctx context.Context, p model.Pointer, entries []mo
 	repaired := false
 	for _, dest := range a.targets[1:] {
 		current, currentInfo, err := a.readPointer(ctx, dest.Store)
-		if err == nil && current.ReleaseID == p.ReleaseID {
+		if err == nil && current.ReleaseID == p.ReleaseID && current.ManifestTSVKey == p.ManifestTSVKey && current.ManifestTSVSHA256 == p.ManifestTSVSHA256 {
 			continue
 		}
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -439,25 +439,27 @@ func (a *App) convergeTargets(ctx context.Context, p model.Pointer, entries []mo
 // the upstream catalog. It is used by lightweight startup after local state was
 // restored from the shared maintenance checkpoint.
 func (a *App) repairLaggingTargets(ctx context.Context) (repaired bool, runErr error) {
-	if len(a.targets) < 2 {
-		return false, nil
-	}
 	pointer, entries, err := a.latest(ctx)
 	if err != nil || pointer.ReleaseID == "" {
 		return false, err
 	}
-	lagging := false
-	for _, target := range a.targets[1:] {
-		current, _, err := a.readPointer(ctx, target.Store)
-		if errors.Is(err, store.ErrNotFound) || (err == nil && current.ReleaseID != pointer.ReleaseID) {
-			lagging = true
-			break
-		}
-		if err != nil {
-			return false, fmt.Errorf("read pointer from %s: %w", target.Name(), err)
+	needsRepair, err := a.manifestTSVPublicationNeedsRepair(ctx, pointer, entries)
+	if err != nil {
+		return false, err
+	}
+	if !needsRepair && len(a.targets) > 1 {
+		for _, target := range a.targets[1:] {
+			current, _, err := a.readPointer(ctx, target.Store)
+			if errors.Is(err, store.ErrNotFound) || (err == nil && (current.ReleaseID != pointer.ReleaseID || current.ManifestTSVKey != pointer.ManifestTSVKey || current.ManifestTSVSHA256 != pointer.ManifestTSVSHA256)) {
+				needsRepair = true
+				break
+			}
+			if err != nil {
+				return false, fmt.Errorf("read pointer from %s: %w", target.Name(), err)
+			}
 		}
 	}
-	if !lagging {
+	if !needsRepair {
 		return false, nil
 	}
 	lease, err := a.acquireLease(ctx)
@@ -487,12 +489,42 @@ func (a *App) repairLaggingTargets(ctx context.Context) (repaired bool, runErr e
 	if err != nil {
 		return repaired, err
 	}
+	pointer, manifestTSVRepaired, err := a.ensureManifestTSV(ctx, pointer, entries)
+	repaired = repaired || manifestTSVRepaired
+	if err != nil {
+		return repaired, err
+	}
 	if a.State != nil && a.Config.Targets.Local {
-		if err := a.State.RecordRelease(ctx, pointer, entries, true); err != nil {
+		if err := a.State.RecordRelease(ctx, pointer, entries); err != nil {
 			return repaired, err
 		}
 	}
 	return repaired, nil
+}
+
+func (a *App) manifestTSVPublicationNeedsRepair(ctx context.Context, pointer model.Pointer, entries []model.Entry) (bool, error) {
+	expected, _, err := attachManifestTSV(pointer, entries)
+	if err != nil {
+		return false, err
+	}
+	if pointer.ManifestTSVKey != expected.ManifestTSVKey || pointer.ManifestTSVSHA256 != expected.ManifestTSVSHA256 {
+		return true, nil
+	}
+	for _, target := range a.targets {
+		for _, key := range []string{expected.ManifestTSVKey, model.LatestManifestTSVKey} {
+			got, err := objectSHA256(ctx, target.Store, key)
+			if errors.Is(err, store.ErrNotFound) {
+				return true, nil
+			}
+			if err != nil {
+				return false, err
+			}
+			if got != expected.ManifestTSVSHA256 {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func syncReleaseToTarget(ctx context.Context, source, dest store.Store, p model.Pointer, entries []model.Entry) error {
@@ -512,6 +544,12 @@ func syncReleaseToTarget(ctx context.Context, source, dest store.Store, p model.
 		{key: model.ScoreListKey(p.ReleaseID), contentType: "text/plain"},
 		{key: model.MetadataKey(p.ReleaseID), contentType: "text/csv"},
 		{key: p.ManifestKey, contentType: "application/gzip", metadata: map[string]string{"format": "jsonl"}},
+	}
+	if p.ManifestTSVKey != "" {
+		objects = append(objects, struct {
+			key, contentType string
+			metadata         map[string]string
+		}{key: p.ManifestTSVKey, contentType: "text/tab-separated-values; charset=utf-8", metadata: map[string]string{"format": "tsv", "release-id": p.ReleaseID}})
 	}
 	for _, object := range objects {
 		opts := store.PutOptions{DoesNotExist: true, ContentType: object.contentType, Metadata: object.metadata}
@@ -587,7 +625,72 @@ func copyMissingObject(ctx context.Context, source, dest store.Store, key string
 	return nil
 }
 
-func (a *App) publish(ctx context.Context, p model.Pointer, scoreList, metadata, manifestBytes []byte) error {
+func attachManifestTSV(pointer model.Pointer, entries []model.Entry) (model.Pointer, []byte, error) {
+	data, sum, err := manifest.EncodeTSV(entries)
+	if err != nil {
+		return model.Pointer{}, nil, err
+	}
+	wantKey := model.ManifestTSVKey(pointer.ReleaseID)
+	if pointer.ManifestTSVKey != "" && pointer.ManifestTSVKey != wantKey {
+		return model.Pointer{}, nil, fmt.Errorf("manifest TSV key is %q, want %q", pointer.ManifestTSVKey, wantKey)
+	}
+	if pointer.ManifestTSVSHA256 != "" && pointer.ManifestTSVSHA256 != sum {
+		return model.Pointer{}, nil, fmt.Errorf("manifest TSV SHA-256 is %s, want %s", pointer.ManifestTSVSHA256, sum)
+	}
+	pointer.ManifestTSVKey = wantKey
+	pointer.ManifestTSVSHA256 = sum
+	return pointer, data, nil
+}
+
+func (a *App) ensureManifestTSV(ctx context.Context, pointer model.Pointer, entries []model.Entry) (model.Pointer, bool, error) {
+	original := pointer
+	pointer, data, err := attachManifestTSV(pointer, entries)
+	if err != nil {
+		return model.Pointer{}, false, err
+	}
+	changed := original.ManifestTSVKey != pointer.ManifestTSVKey || original.ManifestTSVSHA256 != pointer.ManifestTSVSHA256
+	for _, target := range a.targets {
+		if err := putImmutable(ctx, target.Store, pointer.ManifestTSVKey, data, store.PutOptions{
+			DoesNotExist: true,
+			ContentType:  "text/tab-separated-values; charset=utf-8",
+			Metadata:     map[string]string{"format": "tsv", "release-id": pointer.ReleaseID, "sha256": pointer.ManifestTSVSHA256},
+		}); err != nil {
+			return model.Pointer{}, changed, fmt.Errorf("publish release manifest TSV to %s: %w", target.Name(), err)
+		}
+	}
+	if changed {
+		pointerBytes, err := manifest.PointerJSON(pointer)
+		if err != nil {
+			return model.Pointer{}, changed, err
+		}
+		for _, target := range a.targets {
+			current, info, err := a.readPointer(ctx, target.Store)
+			if err != nil {
+				return model.Pointer{}, changed, err
+			}
+			if current.ReleaseID != pointer.ReleaseID {
+				return model.Pointer{}, changed, fmt.Errorf("cannot attach manifest TSV to %s at release %s; current release is %s", target.Name(), pointer.ReleaseID, current.ReleaseID)
+			}
+			generation := info.Generation
+			if _, err := target.Put(ctx, model.LatestKey, bytes.NewReader(pointerBytes), store.PutOptions{ContentType: "application/json", GenerationMatch: &generation}); err != nil {
+				return model.Pointer{}, changed, fmt.Errorf("attach manifest TSV to LATEST in %s: %w", target.Name(), err)
+			}
+		}
+	}
+	for _, target := range a.targets {
+		updated, err := putReplaceable(ctx, target.Store, model.LatestManifestTSVKey, data, store.PutOptions{
+			ContentType: "text/tab-separated-values; charset=utf-8",
+			Metadata:    map[string]string{"format": "tsv", "release-id": pointer.ReleaseID, "sha256": pointer.ManifestTSVSHA256},
+		})
+		changed = changed || updated
+		if err != nil {
+			return model.Pointer{}, changed, fmt.Errorf("publish latest manifest TSV to %s: %w", target.Name(), err)
+		}
+	}
+	return pointer, changed, nil
+}
+
+func (a *App) publish(ctx context.Context, p model.Pointer, scoreList, metadata, manifestBytes, manifestTSV []byte) error {
 	for _, t := range a.targets {
 		if err := putImmutable(ctx, t.Store, model.ScoreListKey(p.ReleaseID), scoreList, store.PutOptions{DoesNotExist: true, ContentType: "text/plain"}); err != nil {
 			return fmt.Errorf("publish score list to %s: %w", t.Name(), err)
@@ -597,6 +700,9 @@ func (a *App) publish(ctx context.Context, p model.Pointer, scoreList, metadata,
 		}
 		if err := putImmutable(ctx, t.Store, p.ManifestKey, manifestBytes, store.PutOptions{DoesNotExist: true, ContentType: "application/gzip", Metadata: map[string]string{"format": "jsonl"}}); err != nil {
 			return fmt.Errorf("publish manifest to %s: %w", t.Name(), err)
+		}
+		if err := putImmutable(ctx, t.Store, p.ManifestTSVKey, manifestTSV, store.PutOptions{DoesNotExist: true, ContentType: "text/tab-separated-values; charset=utf-8", Metadata: map[string]string{"format": "tsv", "release-id": p.ReleaseID, "sha256": p.ManifestTSVSHA256}}); err != nil {
+			return fmt.Errorf("publish manifest TSV to %s: %w", t.Name(), err)
 		}
 	}
 	pointerBytes, err := manifest.PointerJSON(p)
@@ -617,8 +723,42 @@ func (a *App) publish(ctx context.Context, p model.Pointer, scoreList, metadata,
 		if _, err := t.Put(ctx, model.LatestKey, bytes.NewReader(pointerBytes), opts); err != nil {
 			return fmt.Errorf("advance LATEST in %s: %w", t.Name(), err)
 		}
+		if _, err := putReplaceable(ctx, t.Store, model.LatestManifestTSVKey, manifestTSV, store.PutOptions{ContentType: "text/tab-separated-values; charset=utf-8", Metadata: map[string]string{"format": "tsv", "release-id": p.ReleaseID, "sha256": p.ManifestTSVSHA256}}); err != nil {
+			return fmt.Errorf("advance latest manifest TSV in %s: %w", t.Name(), err)
+		}
 	}
 	return nil
+}
+
+func putReplaceable(ctx context.Context, st store.Store, key string, data []byte, opts store.PutOptions) (bool, error) {
+	for attempt := 0; attempt < 4; attempt++ {
+		r, info, err := st.Open(ctx, key)
+		if err == nil {
+			existing, readErr := io.ReadAll(r)
+			closeErr := r.Close()
+			if err := errors.Join(readErr, closeErr); err != nil {
+				return false, err
+			}
+			if bytes.Equal(existing, data) {
+				return false, nil
+			}
+			generation := info.Generation
+			opts.GenerationMatch = &generation
+			opts.DoesNotExist = false
+		} else if errors.Is(err, store.ErrNotFound) {
+			opts.DoesNotExist = true
+			opts.GenerationMatch = nil
+		} else {
+			return false, err
+		}
+		if _, err := st.Put(ctx, key, bytes.NewReader(data), opts); errors.Is(err, store.ErrPrecondition) {
+			continue
+		} else if err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return false, errors.New("replaceable object changed repeatedly")
 }
 
 func putImmutable(ctx context.Context, st store.Store, key string, data []byte, opts store.PutOptions) error {

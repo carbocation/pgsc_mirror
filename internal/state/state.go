@@ -18,6 +18,8 @@ type DB struct {
 	mu sync.Mutex
 }
 
+const stateSchemaVersion = 1
+
 type Sentinel struct {
 	Name, ETag, LastModified, ContentSHA256 string
 	ObservedAt                              time.Time
@@ -52,7 +54,7 @@ func Open(path string) (*DB, error) {
 	}
 	sqldb.SetMaxOpenConns(1)
 	d := &DB{db: sqldb}
-	if err := d.migrate(context.Background()); err != nil {
+	if err := d.initializeSchema(context.Background()); err != nil {
 		sqldb.Close()
 		return nil, err
 	}
@@ -61,7 +63,7 @@ func Open(path string) (*DB, error) {
 
 func (d *DB) Close() error { return d.db.Close() }
 
-func (d *DB) migrate(ctx context.Context) error {
+func (d *DB) initializeSchema(ctx context.Context) error {
 	const schema = `
 CREATE TABLE IF NOT EXISTS runs (
  id INTEGER PRIMARY KEY, command TEXT NOT NULL, started_at TEXT NOT NULL,
@@ -84,17 +86,12 @@ CREATE TABLE IF NOT EXISTS settings (
 CREATE TABLE IF NOT EXISTS scores (
  pgs_id TEXT PRIMARY KEY, release_id TEXT NOT NULL REFERENCES releases(release_id),
  genome_build TEXT NOT NULL, source_url TEXT NOT NULL, source_md5 TEXT NOT NULL,
- size_bytes INTEGER NOT NULL, blob_key TEXT NOT NULL, upstream_etag TEXT NOT NULL DEFAULT '',
+ size_bytes INTEGER NOT NULL, score_key TEXT NOT NULL, upstream_etag TEXT NOT NULL DEFAULT '',
  upstream_last_modified TEXT NOT NULL DEFAULT '', first_seen_at TEXT NOT NULL,
  last_seen_at TEXT NOT NULL, status TEXT NOT NULL, license TEXT NOT NULL DEFAULT '',
  gcs_generation INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS scores_status ON scores(status);
-CREATE TABLE IF NOT EXISTS objects (
- blob_key TEXT PRIMARY KEY, source_md5 TEXT NOT NULL, size_bytes INTEGER NOT NULL,
- local_available INTEGER NOT NULL DEFAULT 0, gcs_generation INTEGER NOT NULL DEFAULT 0,
- verified_at TEXT
-);
 CREATE TABLE IF NOT EXISTS transfers (
  pgs_id TEXT PRIMARY KEY, source_md5 TEXT NOT NULL, part_path TEXT NOT NULL DEFAULT '',
  bytes_downloaded INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,
@@ -110,7 +107,45 @@ CREATE TABLE IF NOT EXISTS inventory_sidecars (
  pgs_id TEXT NOT NULL, source_md5 TEXT NOT NULL, source_url TEXT NOT NULL,
  checked_at TEXT NOT NULL, PRIMARY KEY(checkpoint_id,pgs_id)
 );`
-	if _, err := d.db.ExecContext(ctx, schema); err != nil {
+	var version int
+	if err := d.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		return err
+	}
+	if version > stateSchemaVersion {
+		return fmt.Errorf("state schema version %d is newer than supported version %d", version, stateSchemaVersion)
+	}
+	if version < stateSchemaVersion {
+		// Operational state is disposable and reconstructed from the canonical
+		// target, so incompatible unversioned schemas are reset rather than
+		// carried forward indefinitely.
+		tx, err := d.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		if _, err := tx.ExecContext(ctx, `
+DROP TABLE IF EXISTS inventory_sidecars;
+DROP TABLE IF EXISTS inventory_checkpoints;
+DROP TABLE IF EXISTS scores;
+DROP TABLE IF EXISTS objects;
+DROP TABLE IF EXISTS transfers;
+DROP TABLE IF EXISTS settings;
+DROP TABLE IF EXISTS releases;
+DROP TABLE IF EXISTS maintenance;
+DROP TABLE IF EXISTS sentinels;
+DROP TABLE IF EXISTS runs;`); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, schema); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", stateSchemaVersion)); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+	} else if _, err := d.db.ExecContext(ctx, schema); err != nil {
 		return err
 	}
 	_, err := d.db.ExecContext(ctx, `UPDATE runs SET finished_at=?,status='interrupted',error='process ended before run completion' WHERE status='running'`, time.Now().UTC().Format(time.RFC3339Nano))
@@ -344,7 +379,7 @@ func (d *DB) RestoreReconciliation(ctx context.Context, completedAt time.Time, s
 	return tx.Commit()
 }
 
-func (d *DB) RecordRelease(ctx context.Context, p model.Pointer, entries []model.Entry, localAvailable bool) error {
+func (d *DB) RecordRelease(ctx context.Context, p model.Pointer, entries []model.Entry) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	tx, err := d.db.BeginTx(ctx, nil)
@@ -359,17 +394,9 @@ func (d *DB) RecordRelease(ctx context.Context, p model.Pointer, entries []model
 		return err
 	}
 	for _, e := range entries {
-		_, err = tx.ExecContext(ctx, `INSERT INTO scores(pgs_id,release_id,genome_build,source_url,source_md5,size_bytes,blob_key,upstream_etag,upstream_last_modified,first_seen_at,last_seen_at,status,license,gcs_generation)
- VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(pgs_id) DO UPDATE SET release_id=excluded.release_id,genome_build=excluded.genome_build,source_url=excluded.source_url,source_md5=excluded.source_md5,size_bytes=excluded.size_bytes,blob_key=excluded.blob_key,upstream_etag=excluded.upstream_etag,upstream_last_modified=excluded.upstream_last_modified,first_seen_at=excluded.first_seen_at,last_seen_at=excluded.last_seen_at,status=excluded.status,license=excluded.license,gcs_generation=excluded.gcs_generation`,
+		_, err = tx.ExecContext(ctx, `INSERT INTO scores(pgs_id,release_id,genome_build,source_url,source_md5,size_bytes,score_key,upstream_etag,upstream_last_modified,first_seen_at,last_seen_at,status,license,gcs_generation)
+ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(pgs_id) DO UPDATE SET release_id=excluded.release_id,genome_build=excluded.genome_build,source_url=excluded.source_url,source_md5=excluded.source_md5,size_bytes=excluded.size_bytes,score_key=excluded.score_key,upstream_etag=excluded.upstream_etag,upstream_last_modified=excluded.upstream_last_modified,first_seen_at=excluded.first_seen_at,last_seen_at=excluded.last_seen_at,status=excluded.status,license=excluded.license,gcs_generation=excluded.gcs_generation`,
 			e.PGSID, e.ReleaseID, e.GenomeBuild, e.SourceURL, e.SourceMD5, e.SizeBytes, e.ScoreKey, e.UpstreamETag, e.UpstreamLastModified, e.FirstSeenAt.UTC().Format(time.RFC3339Nano), e.LastSeenAt.UTC().Format(time.RFC3339Nano), e.Status, e.License, e.GCSGeneration)
-		if err != nil {
-			return err
-		}
-		local := 0
-		if localAvailable {
-			local = 1
-		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO objects(blob_key,source_md5,size_bytes,local_available,gcs_generation,verified_at) VALUES(?,?,?,?,?,?) ON CONFLICT(blob_key) DO UPDATE SET local_available=max(local_available,excluded.local_available),gcs_generation=max(gcs_generation,excluded.gcs_generation),verified_at=excluded.verified_at`, e.ScoreKey, e.SourceMD5, e.SizeBytes, local, e.GCSGeneration, time.Now().UTC().Format(time.RFC3339Nano))
 		if err != nil {
 			return err
 		}
@@ -407,7 +434,7 @@ func (d *DB) Rebuild(ctx context.Context, releases []RebuildRelease) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `DELETE FROM scores; DELETE FROM objects; DELETE FROM transfers; DELETE FROM releases; DELETE FROM settings;`); err != nil {
+	if _, err = tx.ExecContext(ctx, `DELETE FROM scores; DELETE FROM transfers; DELETE FROM releases; DELETE FROM settings;`); err != nil {
 		return err
 	}
 	for _, rel := range releases {
@@ -416,10 +443,7 @@ func (d *DB) Rebuild(ctx context.Context, releases []RebuildRelease) error {
 			return err
 		}
 		for _, e := range rel.Entries {
-			if _, err = tx.ExecContext(ctx, `INSERT INTO scores(pgs_id,release_id,genome_build,source_url,source_md5,size_bytes,blob_key,upstream_etag,upstream_last_modified,first_seen_at,last_seen_at,status,license,gcs_generation) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(pgs_id) DO UPDATE SET release_id=excluded.release_id,genome_build=excluded.genome_build,source_url=excluded.source_url,source_md5=excluded.source_md5,size_bytes=excluded.size_bytes,blob_key=excluded.blob_key,upstream_etag=excluded.upstream_etag,upstream_last_modified=excluded.upstream_last_modified,first_seen_at=excluded.first_seen_at,last_seen_at=excluded.last_seen_at,status=excluded.status,license=excluded.license,gcs_generation=excluded.gcs_generation`, e.PGSID, e.ReleaseID, e.GenomeBuild, e.SourceURL, e.SourceMD5, e.SizeBytes, e.ScoreKey, e.UpstreamETag, e.UpstreamLastModified, e.FirstSeenAt.UTC().Format(time.RFC3339Nano), e.LastSeenAt.UTC().Format(time.RFC3339Nano), e.Status, e.License, e.GCSGeneration); err != nil {
-				return err
-			}
-			if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO objects(blob_key,source_md5,size_bytes,gcs_generation) VALUES(?,?,?,?)`, e.ScoreKey, e.SourceMD5, e.SizeBytes, e.GCSGeneration); err != nil {
+			if _, err = tx.ExecContext(ctx, `INSERT INTO scores(pgs_id,release_id,genome_build,source_url,source_md5,size_bytes,score_key,upstream_etag,upstream_last_modified,first_seen_at,last_seen_at,status,license,gcs_generation) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(pgs_id) DO UPDATE SET release_id=excluded.release_id,genome_build=excluded.genome_build,source_url=excluded.source_url,source_md5=excluded.source_md5,size_bytes=excluded.size_bytes,score_key=excluded.score_key,upstream_etag=excluded.upstream_etag,upstream_last_modified=excluded.upstream_last_modified,first_seen_at=excluded.first_seen_at,last_seen_at=excluded.last_seen_at,status=excluded.status,license=excluded.license,gcs_generation=excluded.gcs_generation`, e.PGSID, e.ReleaseID, e.GenomeBuild, e.SourceURL, e.SourceMD5, e.SizeBytes, e.ScoreKey, e.UpstreamETag, e.UpstreamLastModified, e.FirstSeenAt.UTC().Format(time.RFC3339Nano), e.LastSeenAt.UTC().Format(time.RFC3339Nano), e.Status, e.License, e.GCSGeneration); err != nil {
 				return err
 			}
 		}

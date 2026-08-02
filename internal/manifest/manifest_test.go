@@ -2,8 +2,8 @@ package manifest
 
 import (
 	"bytes"
-	"compress/gzip"
-	"io"
+	"encoding/csv"
+	"reflect"
 	"testing"
 	"time"
 
@@ -64,37 +64,36 @@ func TestEncodeDeterministic(t *testing.T) {
 	}
 }
 
-func TestDecodeAcceptsLegacyBlobKeyAndEncodeUsesScoreKey(t *testing.T) {
-	legacy := []byte("{\"release_id\":\"r\",\"pgs_id\":\"PGS000001\",\"genome_build\":\"GRCh38\",\"source_url\":\"https://example.invalid/PGS000001.txt.gz\",\"source_md5\":\"11111111111111111111111111111111\",\"size_bytes\":1,\"blob_key\":\"blobs/md5/11/11111111111111111111111111111111.txt.gz\",\"first_seen_at\":\"2026-08-01T00:00:00Z\",\"last_seen_at\":\"2026-08-01T00:00:00Z\",\"status\":\"available\"}\n")
-	var compressed bytes.Buffer
-	gz := gzip.NewWriter(&compressed)
-	if _, err := gz.Write(legacy); err != nil {
-		t.Fatal(err)
+func TestEncodeTSVIsDeterministicSortedAndComplete(t *testing.T) {
+	now := time.Date(2026, 7, 31, 12, 0, 0, 123, time.UTC)
+	entries := []model.Entry{
+		{ReleaseID: "release", PGSID: "PGS000002", GenomeBuild: "GRCh38", Status: model.StatusGone, ScoreKey: model.ScoreKey("PGS000002", "GRCh38"), SourceMD5: "22222222222222222222222222222222", FirstSeenAt: now, LastSeenAt: now},
+		{ReleaseID: "release", PGSID: "PGS000001", GenomeBuild: "GRCh38", Status: model.StatusReady, ScoreKey: model.ScoreKey("PGS000001", "GRCh38"), SourceMD5: "11111111111111111111111111111111", FirstSeenAt: now, LastSeenAt: now, Header: &scoreheader.Inspection{InspectorVersion: scoreheader.InspectorVersion, Status: scoreheader.StatusRecognized, Type: scoreheader.TypeHarmonizedV2, Columns: []string{"effect_allele", "hm_chr"}}},
 	}
-	if err := gz.Close(); err != nil {
-		t.Fatal(err)
-	}
-	entries, err := Decode(bytes.NewReader(compressed.Bytes()))
+	first, firstSHA, err := EncodeTSV(entries)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := entries[0].ScoreKey; got != "blobs/md5/11/11111111111111111111111111111111.txt.gz" {
-		t.Fatalf("legacy key decoded as %q", got)
-	}
-	entries[0].ScoreKey = model.ScoreKey(entries[0].PGSID, entries[0].GenomeBuild)
-	encoded, _, err := Encode(entries)
+	second, secondSHA, err := EncodeTSV(entries)
 	if err != nil {
 		t.Fatal(err)
 	}
-	decoded, err := gzip.NewReader(bytes.NewReader(encoded))
+	if !bytes.Equal(first, second) || firstSHA != secondSHA {
+		t.Fatal("TSV encoding is not deterministic")
+	}
+	r := csv.NewReader(bytes.NewReader(first))
+	r.Comma = '\t'
+	records, err := r.ReadAll()
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, err := io.ReadAll(decoded)
-	if err != nil {
-		t.Fatal(err)
+	if len(records) != 3 || !reflect.DeepEqual(records[0], TSVColumns) {
+		t.Fatalf("unexpected TSV shape: rows=%d header=%v", len(records), records[0])
 	}
-	if bytes.Contains(body, []byte("blob_key")) || !bytes.Contains(body, []byte(`"score_key":"scores/PGS000001_hmPOS_GRCh38.txt.gz"`)) {
-		t.Fatalf("unexpected current manifest %s", body)
+	if records[1][0] != "release" || records[1][1] != "PGS000001" || records[2][1] != "PGS000002" {
+		t.Fatalf("TSV rows are not release-pinned and sorted: %v", records)
+	}
+	if records[1][20] != `["effect_allele","hm_chr"]` {
+		t.Fatalf("header columns were not preserved as JSON: %q", records[1][20])
 	}
 }

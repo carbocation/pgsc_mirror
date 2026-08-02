@@ -78,11 +78,15 @@ func seedLegacyRelease(t *testing.T, a *App, now time.Time, fixtures ...annotati
 		GenomeBuild:        "GRCh38",
 		ScoreLayoutVersion: model.ScoreLayoutVersion,
 	}
-	if err := a.publish(ctx, pointer, scoreList, metadata, manifestBytes); err != nil {
+	pointer, manifestTSV, err := attachManifestTSV(pointer, entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.publish(ctx, pointer, scoreList, metadata, manifestBytes, manifestTSV); err != nil {
 		t.Fatal(err)
 	}
 	if a.State != nil {
-		if err := a.State.RecordRelease(ctx, pointer, entries, a.Config.Targets.Local); err != nil {
+		if err := a.State.RecordRelease(ctx, pointer, entries); err != nil {
 			t.Fatal(err)
 		}
 	}

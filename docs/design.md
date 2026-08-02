@@ -9,16 +9,18 @@ The public and preservation-critical layout is:
 ```text
 scores/{pgs_id}_hmPOS_GRCh38.txt.gz
 releases/{release_id}/manifest.jsonl.gz
+releases/{release_id}/manifest.tsv
 releases/{release_id}/metadata/pgs_scores_list.txt
 releases/{release_id}/metadata/pgs_all_metadata_scores.csv
 LATEST.json
+LATEST.manifest.tsv
 ```
 
 The flat `scores/` namespace is the ordinary consumer interface. Object names are stable and preserve the PGS Catalog basenames. New scores create new names; revisions conditionally replace an existing name and therefore create a new GCS generation. Metadata snapshots and manifests are immutable. `LATEST.json` is the mutable atomic-snapshot pointer.
 
-Each manifest entry records `score_key`, source MD5, size, and GCS generation. A consumer that only needs new or revised scoring files can list `scores/` and checkpoint `(name, generation)`. A consumer that needs an exact release pins `LATEST.json` and its manifest. Historical GCS retrieval requires Object Versioning so recorded older generations remain available; a local-only target represents the current named view.
+Each manifest entry records `score_key`, source MD5, size, and GCS generation. Every release has equivalent immutable JSONL and TSV manifests; `LATEST.json` pins both keys and checksums. A consumer that only needs new or revised scoring files can list `scores/` and checkpoint `(name, generation)`. A consumer that needs an exact release reads `LATEST.json` and then the referenced immutable manifest. Historical GCS retrieval requires Object Versioning so recorded older generations remain available; a local-only target represents the current named view. The program accepts only this layout and does not translate manifests or objects from another namespace.
 
-Releases created before layout version 1 used `blobs/md5/{prefix}/{md5}.txt.gz`. The first mutating run of a current binary conditionally copies those verified objects into `scores/`, publishes a successor manifest using `score_key`, and leaves the old objects for the normal retention policy. Legacy `blob_key` manifests remain readable during that transition.
+`LATEST.manifest.tsv` is an uncompressed convenience copy of the current release TSV. It is replaced after `LATEST.json` advances, so an interrupted publication can leave it briefly pointing at the preceding release but never at an uncommitted future release. Every data row begins with `release_id`; exact-snapshot consumers compare that value with `LATEST.json` or use the immutable `manifest_tsv_key` directly. The next mutating run repairs a missing or lagging convenience copy.
 
 The mirror also carries one replaceable operational object:
 
@@ -30,15 +32,15 @@ This versioned checkpoint records the last completed checksum-sidecar audit plus
 
 ## Atomic publication
 
-A reconciliation takes a renewable provider-backed lease, verifies the MD5 of each compressed scoring file, creates a missing score or conditionally replaces a revised score generation, writes the release snapshot and manifest, and finally advances `LATEST.json` with compare-and-swap.
+A reconciliation takes a renewable provider-backed lease, verifies the MD5 of each compressed scoring file, creates a missing score or conditionally replaces a revised score generation, writes the release snapshots and manifests, advances `LATEST.json` with compare-and-swap, and then replaces its convenience TSV copy.
 
 Any failed expected object leaves the prior release current. If a multi-target run stops after the authoritative pointer advances, the next reconciliation repairs lagging targets before reporting the mirror current.
 
 ## Interruption and recovery
 
-SQLite is a disposable operational index, not the canonical mirror. It uses foreign keys, WAL, a busy timeout, and serialized writes and is not intended for GCS FUSE.
+SQLite is a disposable operational index, not the canonical mirror. It uses foreign keys, WAL, a busy timeout, and serialized writes and is not intended for GCS FUSE. The database has an explicit schema version; an incompatible operational schema is reset and reconstructed from the canonical target rather than translated indefinitely.
 
-Every successful full reconciliation conditionally updates `operations/maintenance.json`, including audits that find no release change. During migration, an existing SQLite database can backfill an absent checkpoint without upstream access, but only after its successful-audit sentinels match the current release snapshot hashes. On an empty or older local database, the service validates the shared checkpoint's genome build and snapshot hashes against the current `LATEST.json`, then reconstructs the current release, upstream sentinels, and audit schedule from the canonical target. A current checkpoint leads to the ordinary conditional score-list and metadata check, not one checksum-sidecar request per score. The audit is skipped only when upstream confirms both documents are unmodified; a `200` response is conservatively treated as a change signal even when its body matches the stored snapshot, because scoring-file revisions need not alter those documents. Missing, malformed, future-dated, snapshot-inconsistent, or overdue state also falls back to a full audit. A newer checkpoint format stops an older binary rather than letting it overwrite semantics it does not understand.
+Every successful full reconciliation conditionally updates `operations/maintenance.json`, including audits that find no release change. An existing SQLite database can backfill an absent checkpoint without upstream access, but only after its successful-audit sentinels match the current release snapshot hashes. On an empty or older local database, the service validates the shared checkpoint's genome build and snapshot hashes against the current `LATEST.json`, then reconstructs the current release, upstream sentinels, and audit schedule from the canonical target. A current checkpoint leads to the ordinary conditional score-list and metadata check, not one checksum-sidecar request per score. The audit is skipped only when upstream confirms both documents are unmodified; a `200` response is conservatively treated as a change signal even when its body matches the stored snapshot, because scoring-file revisions need not alter those documents. Missing, malformed, future-dated, snapshot-inconsistent, or overdue state also falls back to a full audit. A newer checkpoint format stops an older binary rather than letting it overwrite semantics it does not understand.
 
 Successful checksum-sidecar requests are checkpointed during an interrupted inventory. Verified scoring-file partials remain in `state.work_dir` until every configured target has stored them. Both can be reused after restart when the state database and work directory are on persistent disk.
 

@@ -4,7 +4,7 @@
 
 ## Public contract
 
-A consumer resolves `LATEST.json`, pins the referenced immutable manifest, and reads its gzip-compressed JSONL entries. The schemas are documented in [`latest.schema.json`](latest.schema.json) and [`manifest.schema.json`](manifest.schema.json). Consumers should retain at least:
+A consumer resolves `LATEST.json` and pins either referenced immutable manifest: gzip-compressed JSONL or uncompressed TSV. The schemas are documented in [`latest.schema.json`](latest.schema.json), [`manifest.schema.json`](manifest.schema.json), and [`manifest.tsv.md`](manifest.tsv.md). `LATEST.manifest.tsv` is a convenient readable copy; exact workflows use the immutable `manifest_tsv_key` or verify that every TSV row's `release_id` matches `LATEST.json`. Consumers should retain at least:
 
 - the input mirror release ID;
 - the score's PGS ID and source MD5;

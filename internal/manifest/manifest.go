@@ -6,11 +6,13 @@ import (
 	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
+	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/carbocation/pgsc_mirror/internal/model"
@@ -67,6 +69,113 @@ func Encode(entries []model.Entry) ([]byte, string, error) {
 	}
 	sum := sha256.Sum256(out.Bytes())
 	return out.Bytes(), hex.EncodeToString(sum[:]), nil
+}
+
+var TSVColumns = []string{
+	"release_id",
+	"pgs_id",
+	"genome_build",
+	"status",
+	"score_key",
+	"gcs_generation",
+	"source_md5",
+	"size_bytes",
+	"source_url",
+	"upstream_etag",
+	"upstream_last_modified",
+	"first_seen_at",
+	"last_seen_at",
+	"license",
+	"header_inspector_version",
+	"header_status",
+	"header_type",
+	"header_format_version",
+	"header_delimiter",
+	"header_schema_sha256",
+	"header_columns_json",
+	"header_metadata_keys_json",
+	"header_sections_json",
+	"header_comment_lines",
+	"header_warnings_json",
+	"header_error",
+}
+
+// EncodeTSV renders the complete manifest into a deterministic, database-ready
+// tab-separated table. Nested header slices remain lossless JSON columns.
+func EncodeTSV(entries []model.Entry) ([]byte, string, error) {
+	var out bytes.Buffer
+	w := csv.NewWriter(&out)
+	w.Comma = '\t'
+	if err := w.Write(TSVColumns); err != nil {
+		return nil, "", err
+	}
+	for _, e := range sorted(entries) {
+		record, err := tsvRecord(e)
+		if err != nil {
+			return nil, "", err
+		}
+		if err := w.Write(record); err != nil {
+			return nil, "", err
+		}
+	}
+	w.Flush()
+	if err := w.Error(); err != nil {
+		return nil, "", err
+	}
+	sum := sha256.Sum256(out.Bytes())
+	return out.Bytes(), hex.EncodeToString(sum[:]), nil
+}
+
+func tsvRecord(e model.Entry) ([]string, error) {
+	record := []string{
+		e.ReleaseID,
+		e.PGSID,
+		e.GenomeBuild,
+		e.Status,
+		e.ScoreKey,
+		strconv.FormatInt(e.GCSGeneration, 10),
+		e.SourceMD5,
+		strconv.FormatInt(e.SizeBytes, 10),
+		e.SourceURL,
+		e.UpstreamETag,
+		e.UpstreamLastModified,
+		e.FirstSeenAt.UTC().Format(time.RFC3339Nano),
+		e.LastSeenAt.UTC().Format(time.RFC3339Nano),
+		e.License,
+	}
+	if e.Header == nil {
+		return append(record, "", "", "", "", "", "", "", "", "", "", "", ""), nil
+	}
+	columns, err := json.Marshal(e.Header.Columns)
+	if err != nil {
+		return nil, err
+	}
+	metadataKeys, err := json.Marshal(e.Header.MetadataKeys)
+	if err != nil {
+		return nil, err
+	}
+	sections, err := json.Marshal(e.Header.Sections)
+	if err != nil {
+		return nil, err
+	}
+	warnings, err := json.Marshal(e.Header.Warnings)
+	if err != nil {
+		return nil, err
+	}
+	return append(record,
+		strconv.Itoa(e.Header.InspectorVersion),
+		e.Header.Status,
+		e.Header.Type,
+		e.Header.FormatVersion,
+		e.Header.Delimiter,
+		e.Header.SchemaSHA256,
+		string(columns),
+		string(metadataKeys),
+		string(sections),
+		strconv.Itoa(e.Header.CommentLines),
+		string(warnings),
+		e.Header.Error,
+	), nil
 }
 
 func Decode(r io.Reader) ([]model.Entry, error) {

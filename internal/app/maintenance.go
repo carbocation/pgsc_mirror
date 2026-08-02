@@ -18,8 +18,7 @@ import (
 )
 
 const (
-	// Version 2 prevents pre-flat-layout binaries from publishing the retired
-	// content-addressed layout after a mirror has migrated to score_key.
+	// Version 2 is the current portable maintenance-state contract.
 	maintenanceCheckpointVersion = 2
 	maintenanceCheckpointMaxSize = 1 << 20
 	maintenanceFutureTolerance   = 5 * time.Minute
@@ -268,8 +267,7 @@ func (a *App) restoreMaintenanceCheckpoint(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("read canonical manifest for maintenance restore: %w", err)
 	}
-	localAvailable := a.Config.Targets.Local && !a.Config.Targets.GCS
-	if err := a.State.RecordRelease(ctx, pointer, entries, localAvailable); err != nil {
+	if err := a.State.RecordRelease(ctx, pointer, entries); err != nil {
 		return false, fmt.Errorf("restore current release from canonical mirror: %w", err)
 	}
 	sentinels := []state.Sentinel{
